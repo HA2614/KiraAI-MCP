@@ -50,7 +50,7 @@ services:
     volumes:
       - type: bind
         source: ${HOST_WORKSPACE_ROOT:-./workspace}
-        target: /workspace
+        target: ${CONTAINER_FS_ROOT:-/workspace}
       - type: bind
         source: ${CODEX_HOME_HOST:-./.codex-host}
         target: /root/.codex
