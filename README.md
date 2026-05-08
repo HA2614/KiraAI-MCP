@@ -12,7 +12,7 @@ The default deployment uses Docker Compose and starts:
 
 - Docker and Docker Compose
 - Optional: Node.js 22 for local development
-- Optional: a Codex CLI login directory if you want Codex CLI based code work inside Docker
+- Codex authentication for KiraAI Code Worker and Codex based learning
 
 ## Quick Start
 
@@ -28,6 +28,28 @@ http://localhost:4000
 ```
 
 The app is bound to localhost by default. The Docker setup mounts `./workspace` from this repo into the app container at `/workspace`.
+
+## Codex CLI
+
+You do not need VS Code or a Codex extension on the target machine. Docker installs the Codex CLI inside the app image from the npm dependencies.
+
+Authentication is separate. KiraAI mounts `CODEX_HOME_HOST` into the container at `/root/.codex`, so the new machine needs a Codex login there before Code Worker jobs can run.
+
+Option A, use a host Codex login:
+
+```text
+CODEX_HOME_HOST=C:/Users/your-user/.codex
+```
+
+Option B, create the login from Docker:
+
+```bash
+mkdir .codex-host
+docker compose run --rm -it app /app/node_modules/.bin/codex login
+docker compose up --build
+```
+
+If the browser callback fails inside Docker, run Codex login on the host and point `CODEX_HOME_HOST` at that host login directory.
 
 ## Working On Projects
 

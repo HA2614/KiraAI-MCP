@@ -15,6 +15,26 @@ Open:
 http://localhost:4000
 ```
 
+## Codex Authentication
+
+Docker installs the Codex CLI inside the app image. You do not need VS Code or a Codex extension.
+
+KiraAI Code Worker and Codex based learning still need a Codex login. The Compose file mounts `CODEX_HOME_HOST` to `/root/.codex` inside the container.
+
+Use an existing host login:
+
+```text
+CODEX_HOME_HOST=C:/Users/your-user/.codex
+```
+
+Or create a container-backed login:
+
+```bash
+mkdir .codex-host
+docker compose run --rm -it app /app/node_modules/.bin/codex login
+docker compose up --build
+```
+
 ## Filesystem Mount
 
 The default Compose file mounts:
