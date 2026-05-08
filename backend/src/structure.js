@@ -15,9 +15,20 @@ import { config } from "./config.js";
 import { ValidationError } from "./errors.js";
 
 const ALLOWED_ROOT = path.resolve(config.fsBasePath);
+const TREE_MAX_DIRS_PER_LEVEL = Number(process.env.FS_TREE_MAX_DIRS || 80);
 
 function withSep(p) {
   return p.endsWith(path.sep) ? p : `${p}${path.sep}`;
+}
+
+function withoutTrailingSep(p) {
+  return p.replace(/[\\/]+$/, "");
+}
+
+function isBroadTraversalRoot(p) {
+  const cleaned = withoutTrailingSep(p).replace(/\\/g, "/").toLowerCase();
+  const allowed = withoutTrailingSep(ALLOWED_ROOT).replace(/\\/g, "/").toLowerCase();
+  return cleaned === allowed || /^\/host\/[a-z]$/.test(cleaned) || /^[a-z]:$/.test(cleaned);
 }
 
 function extType(name) {
@@ -65,8 +76,24 @@ async function fileExists(filePath) {
   }
 }
 
-async function toFsEntry(fullPath) {
-  const st = await stat(fullPath);
+async function toFsEntry(fullPath, dirent = null) {
+  let st = null;
+  try {
+    st = await stat(fullPath);
+  } catch (error) {
+    if (!dirent) throw error;
+    return {
+      path: fullPath,
+      name: path.basename(fullPath),
+      kind: dirent.isDirectory() ? "directory" : "file",
+      size: null,
+      sizeLabel: "",
+      typeLabel: "Unavailable",
+      modifiedAt: null,
+      inaccessible: true,
+      errorCode: error?.code || "UNKNOWN"
+    };
+  }
   const name = path.basename(fullPath);
   return {
     path: fullPath,
@@ -92,7 +119,7 @@ export async function fsList({ targetPath, includeHidden = true }) {
     for (const e of entries) {
       if (!includeHidden && e.name.startsWith(".")) continue;
       const full = path.join(resolved, e.name);
-      const info = await toFsEntry(full);
+      const info = await toFsEntry(full, e);
       mapped.push(info);
     }
     mapped.sort((a, b) => {
@@ -113,15 +140,28 @@ export async function fsList({ targetPath, includeHidden = true }) {
 
 export async function fsTree({ targetPath, depth = 2 }) {
   const resolved = resolveSafePath(targetPath);
-  const safeDepth = Math.max(1, Math.min(5, Number(depth || 2)));
+  const requestedDepth = Math.max(1, Math.min(5, Number(depth || 2)));
+  const safeDepth = isBroadTraversalRoot(resolved) ? 1 : requestedDepth;
   async function walk(current, level) {
     const node = await toFsEntry(current);
     if (node.kind !== "directory" || level >= safeDepth) return { ...node, children: [] };
-    const entries = await readdir(current, { withFileTypes: true });
-    const dirs = entries.filter((e) => e.isDirectory()).sort((a, b) => a.name.localeCompare(b.name));
+    let entries = [];
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return { ...node, children: [] };
+    }
+    const allDirs = entries.filter((e) => e.isDirectory()).sort((a, b) => a.name.localeCompare(b.name));
+    const dirs = allDirs.slice(0, TREE_MAX_DIRS_PER_LEVEL);
     const children = [];
-    for (const d of dirs) children.push(await walk(path.join(current, d.name), level + 1));
-    return { ...node, children };
+    for (const d of dirs) {
+      try {
+        children.push(await walk(path.join(current, d.name), level + 1));
+      } catch {
+        // Windows drive roots can contain protected junctions; skip unreadable branches.
+      }
+    }
+    return { ...node, children, truncated: allDirs.length > dirs.length };
   }
   return walk(resolved, 0);
 }

@@ -1,6 +1,9 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        VITE_DEFAULT_ROOT: ${VITE_DEFAULT_ROOT:-/workspace}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -8,22 +11,49 @@ services:
       redis:
         condition: service_healthy
     environment:
+      NODE_NO_WARNINGS: ${NODE_NO_WARNINGS:-1}
       PORT: 4000
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/mcp_pm
       REDIS_URL: redis://redis:6379
-      FS_BASE_PATH: /workspace
+      FS_BASE_PATH: ${CONTAINER_FS_ROOT:-/workspace}
+      FS_TREE_MAX_DIRS: ${FS_TREE_MAX_DIRS:-80}
       STATIC_FRONTEND_DIR: /app/frontend/dist
       AI_PROVIDER: ${CONTAINER_AI_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       CODE_AI_MODEL: ${CODE_AI_MODEL:-gpt-5.5}
+      CODE_JOB_SANDBOX: ${CODE_JOB_SANDBOX:-danger-full-access}
+      CODE_JOB_REASONING_EFFORT: ${CODE_JOB_REASONING_EFFORT:-low}
+      CODE_JOB_TIMEOUT_MS: ${CODE_JOB_TIMEOUT_MS:-450000}
+      JOB_RESUME_ENABLED: ${JOB_RESUME_ENABLED:-true}
+      CODE_JOB_MAX_RESUME_ATTEMPTS: ${CODE_JOB_MAX_RESUME_ATTEMPTS:-2}
+      ML_JOB_MAX_RESUME_ATTEMPTS: ${ML_JOB_MAX_RESUME_ATTEMPTS:-2}
+      JOB_RESUME_STALE_MS: ${JOB_RESUME_STALE_MS:-30000}
       CODEX_MODEL: ${CODEX_MODEL:-}
       CODEX_SUMMARY_MODEL: ${CODEX_SUMMARY_MODEL:-gpt-5.3-codex}
-      CODEX_BIN: ${CONTAINER_CODEX_BIN:-codex}
+      CODEX_SUMMARY_SANDBOX: ${CODEX_SUMMARY_SANDBOX:-danger-full-access}
+      CODEX_TIMEOUT_MS: ${CODEX_TIMEOUT_MS:-450000}
+      CODEX_BIN: ${CONTAINER_CODEX_BIN:-/app/node_modules/.bin/codex}
+      CODEX_HOME: /root/.codex
+      ML_MIND_ENABLED: ${ML_MIND_ENABLED:-true}
+      ML_AI_PROVIDER: ${ML_AI_PROVIDER:-codex_cli}
+      ML_EMBEDDING_PROVIDER: ${ML_EMBEDDING_PROVIDER:-local_hash}
+      ML_EMBEDDING_MODEL: ${ML_EMBEDDING_MODEL:-text-embedding-3-small}
+      ML_SKILL_MODEL: ${ML_SKILL_MODEL:-gpt-5.5}
+      ML_MAX_REPO_MB: ${ML_MAX_REPO_MB:-120}
+      ML_MAX_FILE_BYTES: ${ML_MAX_FILE_BYTES:-200000}
+      ML_CHUNK_SIZE: ${ML_CHUNK_SIZE:-1800}
+      ML_CHUNK_OVERLAP: ${ML_CHUNK_OVERLAP:-250}
+      ML_RETRIEVAL_LIMIT: ${ML_RETRIEVAL_LIMIT:-8}
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
     volumes:
-      - workspace:/workspace
+      - type: bind
+        source: ${HOST_WORKSPACE_ROOT:-./workspace}
+        target: /workspace
+      - type: bind
+        source: ${CODEX_HOME_HOST:-./.codex-host}
+        target: /root/.codex
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -58,4 +88,3 @@ services:
 volumes:
   pgdata:
   redisdata:
-  workspace:

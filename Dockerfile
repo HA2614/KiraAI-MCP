@@ -8,11 +8,16 @@ RUN npm ci
 FROM deps AS build
 WORKDIR /app
 COPY . .
+ARG VITE_DEFAULT_ROOT=/workspace
+ENV VITE_DEFAULT_ROOT=$VITE_DEFAULT_ROOT
 RUN npm --workspace frontend run build
 
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates bubblewrap git ripgrep \
+  && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 COPY backend/package.json backend/package.json
 COPY --from=deps /app/node_modules ./node_modules

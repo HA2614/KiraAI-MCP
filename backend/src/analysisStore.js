@@ -1,4 +1,6 @@
+import path from "node:path";
 import { query } from "./db.js";
+import { resolveSafePath } from "./structure.js";
 
 let ensured = false;
 
@@ -21,20 +23,75 @@ function normalizePromptProfile(analysisJson = {}) {
   };
 }
 
+function clampText(value, fallback, max = 400) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return (text || fallback).slice(0, max);
+}
+
+function arrayText(value, maxItems = 6) {
+  if (!Array.isArray(value)) return "";
+  return value.map((item) => String(item || "").trim()).filter(Boolean).slice(0, maxItems).join(", ");
+}
+
+function getProjectMetadata(summary) {
+  const analysisJson = summary.analysis_json || summary.analysisJson || {};
+  const metadata = analysisJson.projectMetadata || {};
+  const root = summary.root_path || summary.root || "";
+  const folderName = path.basename(root) || "Existing Codebase";
+  const title = metadata.name || analysisJson.title || summary.title || folderName;
+  const description = metadata.productDescription || metadata.description || analysisJson.projectDescription || summary.description || "";
+  const techStack = metadata.techStack || arrayText(metadata.detectedFrameworks) || arrayText(analysisJson.architectureOverview) || arrayText((analysisJson.files || []).map((file) => file.role));
+
+  return {
+    name: clampText(title, folderName, 120),
+    goals: clampText(metadata.goals || description, `Maintain and improve the existing ${folderName} codebase.`, 1000),
+    techStack: clampText(techStack, "Detected from analyzer summary", 500),
+    timeline: "Existing codebase - ongoing",
+    budget: "N/A",
+    rootPath: root
+  };
+}
+
+function withSummaryAliases(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    analysisVersion: row.analysis_version,
+    projectId: row.project_id,
+    projectName: row.project_name,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    durationMs: row.duration_ms,
+    stageTimings: row.stage_timings
+  };
+}
+
 async function ensureSummariesTable() {
   if (ensured) return;
   await query(`
     CREATE TABLE IF NOT EXISTS codebase_summaries (
       id SERIAL PRIMARY KEY,
       root_path TEXT NOT NULL,
+      project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+      analysis_version INTEGER NOT NULL DEFAULT 1,
       title TEXT NOT NULL,
       description TEXT NOT NULL,
       full_report TEXT NOT NULL,
       analysis_json JSONB,
       model TEXT,
+      started_at TIMESTAMP,
+      finished_at TIMESTAMP,
+      duration_ms INTEGER,
+      stage_timings JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
     ALTER TABLE codebase_summaries ADD COLUMN IF NOT EXISTS analysis_json JSONB;
+    ALTER TABLE codebase_summaries ADD COLUMN IF NOT EXISTS project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL;
+    ALTER TABLE codebase_summaries ADD COLUMN IF NOT EXISTS analysis_version INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE codebase_summaries ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;
+    ALTER TABLE codebase_summaries ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP;
+    ALTER TABLE codebase_summaries ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
+    ALTER TABLE codebase_summaries ADD COLUMN IF NOT EXISTS stage_timings JSONB NOT NULL DEFAULT '{}'::jsonb;
   `);
   ensured = true;
 }
@@ -42,15 +99,56 @@ async function ensureSummariesTable() {
 export async function saveCodebaseSummary(result) {
   await ensureSummariesTable();
   const analysisJson = result.analysisJson || null;
-  const inserted = await query(
-    `INSERT INTO codebase_summaries (root_path, title, description, full_report, analysis_json, model)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     RETURNING id, root_path, title, description, full_report, analysis_json, model, created_at`,
-    [result.root, result.title, result.description, result.fullReport, analysisJson, result.model || null]
+  const versionRow = await query(
+    "SELECT COALESCE(MAX(analysis_version), 0) + 1 AS next_version FROM codebase_summaries WHERE root_path=$1",
+    [result.root]
   );
-  const summary = inserted.rows[0];
-  const learning = await saveAnalysisLearning({ ...result, summaryId: summary.id, analysisJson: analysisJson || {} });
+  const analysisVersion = Number(versionRow.rows[0]?.next_version || 1);
+  const inserted = await query(
+    `INSERT INTO codebase_summaries
+       (root_path, project_id, analysis_version, title, description, full_report, analysis_json, model, started_at, finished_at, duration_ms, stage_timings)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     RETURNING id, root_path, project_id, analysis_version, title, description, full_report, analysis_json, model, started_at, finished_at, duration_ms, stage_timings, created_at`,
+    [
+      result.root,
+      result.projectId || null,
+      analysisVersion,
+      result.title,
+      result.description,
+      result.fullReport,
+      analysisJson,
+      result.model || null,
+      result.startedAt || null,
+      result.finishedAt || null,
+      result.durationMs || null,
+      JSON.stringify(result.stageTimings || {})
+    ]
+  );
+  const summary = withSummaryAliases(inserted.rows[0]);
+  const learning = await saveAnalysisLearning({ ...result, summaryId: summary.id, analysisVersion, analysisJson: analysisJson || {} });
   return { ...summary, ...learning };
+}
+
+export async function updateCodebaseSummaryTiming(summaryId, timing = {}) {
+  await ensureSummariesTable();
+  const row = await query(
+    `UPDATE codebase_summaries
+     SET started_at=COALESCE($2, started_at),
+         finished_at=COALESCE($3, finished_at),
+         duration_ms=COALESCE($4, duration_ms),
+         stage_timings=COALESCE($5::jsonb, stage_timings)
+     WHERE id=$1
+     RETURNING id, root_path, project_id, analysis_version, title, description, full_report, analysis_json, model,
+               started_at, finished_at, duration_ms, stage_timings, created_at`,
+    [
+      summaryId,
+      timing.startedAt || null,
+      timing.finishedAt || null,
+      timing.durationMs ?? null,
+      timing.stageTimings ? JSON.stringify(timing.stageTimings) : null
+    ]
+  );
+  return withSummaryAliases(row.rows[0]) || null;
 }
 
 export async function saveAnalysisLearning(result) {
@@ -70,6 +168,8 @@ export async function saveAnalysisLearning(result) {
   const event = await saveLearningEvent(result.root, "analysis_completed", {
     analysisRunId: analysisRun.id,
     summaryId: result.summaryId || null,
+    analysisVersion: result.analysisVersion || null,
+    durationMs: result.durationMs || null,
     suggestionCount: suggestions.length,
     checkCount: checks.length
   });
@@ -219,23 +319,83 @@ export async function getLearningProfile(rootPath) {
 export async function listCodebaseSummaries(limit = 20, offset = 0) {
   await ensureSummariesTable();
   const rows = await query(
-    `SELECT id, root_path, title, description, model, created_at
-     FROM codebase_summaries
-     ORDER BY created_at DESC
+    `SELECT s.id, s.root_path, s.project_id, s.analysis_version, s.title, s.description, s.model,
+            s.started_at, s.finished_at, s.duration_ms, s.stage_timings, s.created_at,
+            p.name AS project_name
+     FROM codebase_summaries s
+     LEFT JOIN projects p ON p.id = s.project_id
+     ORDER BY s.created_at DESC
      LIMIT $1 OFFSET $2`,
     [limit, offset]
   );
-  return rows.rows;
+  return rows.rows.map(withSummaryAliases);
+}
+
+export async function listProjectCodebaseSummaries(project, limit = 40, offset = 0) {
+  await ensureSummariesTable();
+  const rows = await query(
+    `SELECT s.id, s.root_path, s.project_id, s.analysis_version, s.title, s.description, s.model,
+            s.started_at, s.finished_at, s.duration_ms, s.stage_timings, s.created_at,
+            p.name AS project_name
+     FROM codebase_summaries s
+     LEFT JOIN projects p ON p.id = s.project_id
+     WHERE s.project_id=$1 OR ($2 <> '' AND s.root_path=$2)
+     ORDER BY s.analysis_version DESC, s.created_at DESC
+     LIMIT $3 OFFSET $4`,
+    [project.id, project.root_path || "", limit, offset]
+  );
+  return rows.rows.map(withSummaryAliases);
 }
 
 export async function getCodebaseSummaryById(id) {
   await ensureSummariesTable();
   const row = await query(
-    `SELECT id, root_path, title, description, full_report, analysis_json, model, created_at
-     FROM codebase_summaries
-     WHERE id=$1
+    `SELECT s.id, s.root_path, s.project_id, s.analysis_version, s.title, s.description, s.full_report, s.analysis_json, s.model,
+            s.started_at, s.finished_at, s.duration_ms, s.stage_timings, s.created_at,
+            p.name AS project_name
+     FROM codebase_summaries s
+     LEFT JOIN projects p ON p.id = s.project_id
+     WHERE s.id=$1
      LIMIT 1`,
     [id]
   );
-  return row.rows[0] || null;
+  return withSummaryAliases(row.rows[0]) || null;
+}
+
+export async function addSummaryAsProject(summaryId) {
+  await ensureSummariesTable();
+  const summary = await getCodebaseSummaryById(summaryId);
+  if (!summary) return null;
+
+  const safeRoot = resolveSafePath(summary.root_path);
+  const metadata = getProjectMetadata({ ...summary, root_path: safeRoot });
+  const existing = await query("SELECT * FROM projects WHERE root_path=$1 LIMIT 1", [safeRoot]);
+
+  let project;
+  let created = false;
+  let updated = false;
+  if (existing.rowCount) {
+    const row = await query(
+      `UPDATE projects
+       SET name=$1, goals=$2, tech_stack=$3, timeline=$4, budget=$5, root_path=$6, updated_at=NOW()
+       WHERE id=$7
+       RETURNING *`,
+      [metadata.name, metadata.goals, metadata.techStack, metadata.timeline, metadata.budget, safeRoot, existing.rows[0].id]
+    );
+    project = row.rows[0];
+    updated = true;
+  } else {
+    const row = await query(
+      `INSERT INTO projects (name, goals, tech_stack, timeline, budget, root_path)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       RETURNING *`,
+      [metadata.name, metadata.goals, metadata.techStack, metadata.timeline, metadata.budget, safeRoot]
+    );
+    project = row.rows[0];
+    created = true;
+  }
+
+  await query("UPDATE codebase_summaries SET project_id=$1 WHERE id=$2", [project.id, summary.id]);
+  const linkedSummary = await getCodebaseSummaryById(summary.id);
+  return { project, summary: linkedSummary, created, updated };
 }

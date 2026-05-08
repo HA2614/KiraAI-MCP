@@ -1,11 +1,11 @@
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import fs from "node:fs";
 import { config } from "./config.js";
+import { resolveCodexBinary } from "./codexBinary.js";
 import { ExternalServiceError } from "./errors.js";
 import { logWarn } from "./logger.js";
 import { validatePlanOrThrow } from "./planSchema.js";
@@ -186,32 +186,6 @@ Output only JSON with no markdown fences and no additional commentary.`;
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
-}
-
-async function resolveCodexBinary() {
-  if (config.codexBin && fs.existsSync(config.codexBin)) {
-    return config.codexBin;
-  }
-  if (config.codexBin && config.codexBin !== "codex") {
-    return config.codexBin;
-  }
-
-  if (process.platform === "win32") {
-    const userProfile = process.env.USERPROFILE || "";
-    const extRoot = path.join(userProfile, ".vscode", "extensions");
-    try {
-      const entries = await readdir(extRoot, { withFileTypes: true });
-      const candidates = entries
-        .filter((d) => d.isDirectory() && d.name.startsWith("openai.chatgpt-"))
-        .map((d) => path.join(extRoot, d.name, "bin", "windows-x86_64", "codex.exe"));
-      const existing = candidates.find((p) => fs.existsSync(p));
-      if (existing) return existing;
-    } catch {
-      // no-op
-    }
-  }
-
-  return "codex";
 }
 
 function parsePlanJson(payload) {

@@ -339,7 +339,7 @@ async function fileExplorerFlow() {
 }
 
 async function summarizeCodebaseFlow() {
-  header("Codebase Summary");
+  header("KiraAI Codebase Summary");
   const { targetPath } = await inquirer.prompt([
     {
       type: "input",
@@ -357,7 +357,7 @@ async function summarizeCodebaseFlow() {
     process.stdout.write(`\r  [${bar}] ${String(safe).padStart(3, " ")}%  ${message.padEnd(38, " ")}`);
   }
 
-  console.log("  Analyzing...");
+  console.log("  KiraAI is analyzing...");
   const summary = await summarizeCodebaseWithCodex(targetPath, {
     onProgress: ({ progress, message }) => {
       renderProgress(progress, message || "Working");
@@ -378,7 +378,7 @@ async function summarizeCodebaseFlow() {
 }
 
 async function aiCodeFlow() {
-  header("AI Code Worker");
+  header("KiraAI Code Worker");
   const answers = await inquirer.prompt([
     { type: "input", name: "rootPath", message: "Project root:", default: repoRoot },
     { type: "editor", name: "userPrompt", message: "Code prompt:" }
@@ -542,7 +542,7 @@ async function desktopLauncherFlow() {
 
 async function mainMenu() {
   while (true) {
-    header("MCP Project Terminal Suite");
+    header("KiraAI Terminal Suite");
     printKV("Active Project", activeProjectId ? `#${activeProjectId}` : "None");
     const { menu } = await inquirer.prompt([
       {
@@ -558,7 +558,7 @@ async function mainMenu() {
           { name: "Promote Plan Baseline", value: "promote" },
           { name: "Generate Project Structure", value: "genStructure" },
           { name: "File Explorer", value: "explorer" },
-          { name: "AI Code Worker", value: "aiCode" },
+          { name: "KiraAI Code Worker", value: "aiCode" },
           { name: "Advanced Tools", value: "advanced" },
           { name: "Exit", value: "exit" }
         ]

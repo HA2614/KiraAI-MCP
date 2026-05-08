@@ -18,7 +18,6 @@ export function PlansView(props) {
       <Card>
         <CardHeader>
           <CardTitle>Plan Workspace</CardTitle>
-          <CardDescription>Generate versions, review milestones, and manage baseline decisions.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2">
           <Button onClick={() => generatePlan(selectedProjectId, settings.provider, refreshSelectedProject, loadHistory)}>Generate New Version</Button>

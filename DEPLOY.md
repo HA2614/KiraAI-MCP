@@ -1,6 +1,6 @@
-# Deploy
+# Deployment
 
-This stack is designed to run from Docker Compose with the app, Postgres, and Redis.
+KiraAI-MCP is designed to run with Docker Compose.
 
 ## First Run
 
@@ -15,15 +15,39 @@ Open:
 http://localhost:4000
 ```
 
+## Filesystem Mount
+
+The default Compose file mounts:
+
+```text
+./workspace -> /workspace
+```
+
+To work on another folder, edit `.env`:
+
+```text
+HOST_WORKSPACE_ROOT=/absolute/path/to/projects
+CONTAINER_FS_ROOT=/workspace
+VITE_DEFAULT_ROOT=/workspace
+```
+
+On Windows:
+
+```text
+HOST_WORKSPACE_ROOT=C:/
+```
+
+The app can read and write inside the mounted folder.
+
 ## Services
 
-- `app`: Node backend serving the built frontend from `frontend/dist`.
-- `postgres`: `pgvector/pgvector:pg16`, source of truth for projects, plans, analyses, learning state, and code jobs.
-- `redis`: cache and lightweight coordination helper. The app continues when Redis is temporarily unavailable.
+- `app`: Node backend and React frontend
+- `postgres`: pgvector database
+- `redis`: cache and coordination
 
-## Required Runtime Secrets
+## Secrets
 
-Set these in `.env` or your host/deployment secret manager:
+Set secrets in `.env` or in your deployment secret manager:
 
 ```text
 OPENAI_API_KEY=
@@ -32,18 +56,31 @@ ANTHROPIC_API_KEY=
 
 Do not commit `.env`.
 
-## Useful Commands
+## Commands
 
 ```bash
-docker compose up --build
+docker compose config
+docker compose build
+docker compose up -d
 docker compose logs -f app
 docker compose down
 docker compose down -v
 ```
 
-## Public Repo Checklist
+Use `docker compose down -v` only when you want to remove database data.
 
-- Rotate any API key that was ever placed in `.env.example`.
-- Confirm `.env` is untracked.
-- Confirm `frontend/dist`, `node_modules`, logs, and caches are untracked.
-- Run `npm run build`.
+## Validation
+
+```bash
+npm run qa
+docker compose config
+docker compose build
+docker compose up -d
+```
+
+Then verify:
+
+```text
+http://localhost:4000
+http://localhost:4000/api/health
+```

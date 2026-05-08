@@ -8,6 +8,8 @@ import { connectRedis } from "./cache.js";
 import { router } from "./routes.js";
 import { attachRequestId, fail } from "./response.js";
 import { logError, logInfo } from "./logger.js";
+import { recoverInterruptedCodeJobsOnStartup } from "./codeJobs.js";
+import { recoverInterruptedMlJobsOnStartup } from "./mlMind.js";
 
 const app = express();
 
@@ -70,6 +72,14 @@ app.use((err, req, res, _next) => {
 
 async function bootstrap() {
   await connectRedis();
+  const resumedCodeJobs = await recoverInterruptedCodeJobsOnStartup();
+  if (resumedCodeJobs.length) {
+    logInfo("code_jobs_resumed_on_startup", { count: resumedCodeJobs.length });
+  }
+  const resumedMlJobs = await recoverInterruptedMlJobsOnStartup();
+  if (resumedMlJobs.length) {
+    logInfo("ml_jobs_resumed_on_startup", { count: resumedMlJobs.length });
+  }
   app.listen(config.port, () => {
     logInfo("api_started", {
       url: `http://localhost:${config.port}`,

@@ -1,5 +1,6 @@
 # Logs
 logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -21,6 +22,9 @@ jspm_packages/
 .env
 .env.*
 !.env.example
+.codex/
+.codex-host/
+.claude/
 
 # Build output and caches
 dist/
@@ -29,6 +33,9 @@ build/
 coverage/
 *.lcov
 .cache/
+.temp/
+temp/
+tmp/
 .parcel-cache/
 .vite/
 .next/
@@ -57,7 +64,18 @@ desktop/__pycache__/
 **/__pycache__/
 
 # Editor/test artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.history/
 .vscode-test/
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
-node_modules
+
+# Local runtime data
+workspace/*
+!workspace/.gitkeep
+pgdata/
+redisdata/
+data/

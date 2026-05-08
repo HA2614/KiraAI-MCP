@@ -122,7 +122,12 @@ async function collectCandidateFiles(rootPath, maxFiles = 800) {
 
   async function walk(dir) {
     if (out.length >= maxFiles) return;
-    const entries = await readdir(dir, { withFileTypes: true });
+    let entries = [];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
     for (const entry of entries) {
       if (out.length >= maxFiles) break;
       const full = path.join(dir, entry.name);
@@ -135,7 +140,12 @@ async function collectCandidateFiles(rootPath, maxFiles = 800) {
       if (!isLikelyTextFile(full)) continue;
 
       const rel = path.relative(rootPath, full).replace(/\\/g, "/");
-      const fileStat = await stat(full);
+      let fileStat = null;
+      try {
+        fileStat = await stat(full);
+      } catch {
+        continue;
+      }
       if (fileStat.size > 1024 * 1024) continue;
       out.push({ absolutePath: full, relativePath: rel, bytes: fileStat.size });
     }
@@ -161,7 +171,12 @@ export async function summarizeCodebase(targetPath, options = {}) {
   const total = candidates.length || 1;
   for (let i = 0; i < candidates.length; i += 1) {
     const f = candidates[i];
-    const content = await readFile(f.absolutePath, "utf8");
+    let content = "";
+    try {
+      content = await readFile(f.absolutePath, "utf8");
+    } catch {
+      continue;
+    }
     files.push({ ...f, content });
     if ((i + 1) % 10 === 0 || i === candidates.length - 1) {
       const progress = 5 + Math.floor(((i + 1) / total) * 65);

@@ -1,42 +1,131 @@
-# MCP Project Manager (Terminal + Web + Desktop)
+# KiraAI-MCP
 
-This project supports three interfaces over one backend:
-- Terminal Suite
-- REST API + React UI
-- MCP stdio server
-- Optional Python desktop launcher (opens browser to local app)
+KiraAI-MCP is a local project workspace for planning, codebase analysis, file exploration, machine learning assisted prompt context, and reviewable code proposals.
 
-## Quick start
-1. Start infra:
-   `docker compose up -d`
-2. Apply schema:
-   `psql postgresql://postgres:postgres@localhost:5432/mcp_pm -f backend/sql/schema.sql`
-3. Build frontend for `http://localhost:4000/`:
-   `npm run build`
-4. Start API server:
-   `npm run start`
+The default deployment uses Docker Compose and starts:
 
-If frontend build is missing, `/` returns a clear message with next steps.
+- KiraAI app: Node backend serving the React frontend
+- Postgres with pgvector
+- Redis
 
-## Separate run modes
-- Terminal suite: `npm run terminal`
-- MCP stdio server: `npm run mcp`
-- Desktop launcher (attach mode): `npm run desktop`
-- Desktop launcher (auto-start backend): `npm run desktop:start`
+## Prerequisites
 
-Backend workspace equivalents:
-- `npm --workspace backend run terminal`
-- `npm --workspace backend run mcp`
-- `npm --workspace backend run desktop`
-- `npm --workspace backend run desktop:start`
+- Docker and Docker Compose
+- Optional: Node.js 22 for local development
+- Optional: a Codex CLI login directory if you want Codex CLI based code work inside Docker
 
-## API additions
-- `GET /api/projects/:id/plans` (filters + pagination)
-- `GET /api/projects/:id/plans/compare?againstVersion=N`
-- `POST /api/plans/:planId/promote-baseline`
-- `POST /api/analysis/summarize-codebase` (folder-wide summary, per-file descriptions, Mermaid pipeline)
-- Feedback action includes `needs_review`
-- Structure generation options: `profile`, `dryRun`, `overwriteStrategy`
+## Quick Start
 
-## Filesystem safety
-Filesystem endpoints are restricted to `FS_BASE_PATH` (default: the backend working directory).
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Open:
+
+```text
+http://localhost:4000
+```
+
+The app is bound to localhost by default. The Docker setup mounts `./workspace` from this repo into the app container at `/workspace`.
+
+## Working On Projects
+
+Place projects inside `./workspace`, or set this in `.env`:
+
+```text
+HOST_WORKSPACE_ROOT=/absolute/path/to/projects
+CONTAINER_FS_ROOT=/workspace
+VITE_DEFAULT_ROOT=/workspace
+```
+
+On Windows you can use a path such as:
+
+```text
+HOST_WORKSPACE_ROOT=C:/
+```
+
+Keep the app private unless you intentionally want another machine to access your local filesystem through KiraAI.
+
+## Configuration
+
+Copy `.env.example` to `.env` and adjust values as needed.
+
+Common settings:
+
+```text
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+CODE_AI_MODEL=gpt-5.5
+ML_MIND_ENABLED=true
+ML_AI_PROVIDER=codex_cli
+ML_EMBEDDING_PROVIDER=local_hash
+```
+
+Do not commit `.env`.
+
+## Local Development
+
+```bash
+npm ci
+npm run dev
+```
+
+Backend only:
+
+```bash
+npm --workspace backend run dev
+```
+
+Frontend only:
+
+```bash
+npm --workspace frontend run dev
+```
+
+## Quality Checks
+
+Run the full check before publishing changes:
+
+```bash
+npm run qa
+```
+
+This applies the schema, checks backend syntax, runs the KiraAI prompt-selection QA suite, exercises the website learning fixture, and builds the frontend.
+
+## Useful Commands
+
+```bash
+docker compose up --build
+docker compose up -d
+docker compose logs -f app
+docker compose down
+docker compose down -v
+```
+
+`docker compose down -v` removes database volumes.
+
+## Services
+
+- `app`: Backend API and built frontend
+- `postgres`: Project, analysis, job, and ML storage
+- `redis`: Cache and coordination
+
+## Public Repo Safety
+
+Before pushing:
+
+```bash
+git status --short
+npm run qa
+docker compose config
+```
+
+Confirm these are not staged:
+
+- `.env`
+- `.claude/`
+- `.codex-host/`
+- `node_modules/`
+- `frontend/dist/`
+- local workspace content under `workspace/`

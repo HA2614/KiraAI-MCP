@@ -3,24 +3,24 @@
 @tailwind utilities;
 
 :root {
-  --background: 210 40% 98%;
-  --foreground: 222 47% 11%;
+  --background: 214 33% 97%;
+  --foreground: 224 40% 12%;
   --card: 0 0% 100%;
-  --card-foreground: 222 47% 11%;
-  --primary: 221 83% 53%;
-  --primary-foreground: 210 40% 98%;
-  --secondary: 210 40% 96%;
-  --secondary-foreground: 222 47% 11%;
-  --muted: 214 32% 91%;
-  --muted-foreground: 215 16% 47%;
-  --accent: 199 89% 48%;
-  --accent-foreground: 210 40% 98%;
+  --card-foreground: 224 40% 12%;
+  --primary: 188 85% 32%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 211 31% 94%;
+  --secondary-foreground: 224 40% 12%;
+  --muted: 213 26% 90%;
+  --muted-foreground: 218 14% 42%;
+  --accent: 342 82% 58%;
+  --accent-foreground: 0 0% 100%;
   --destructive: 0 84% 60%;
   --destructive-foreground: 210 40% 98%;
-  --border: 214 32% 84%;
-  --input: 214 32% 84%;
-  --ring: 221 83% 53%;
-  --radius: 0.75rem;
+  --border: 213 24% 82%;
+  --input: 213 24% 82%;
+  --ring: 188 85% 32%;
+  --radius: 0.5rem;
 }
 
 @layer base {
@@ -28,9 +28,30 @@
     @apply border-border;
   }
 
+  html {
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
   body {
-    @apply min-h-screen bg-background text-foreground antialiased;
-    background-image: radial-gradient(circle at 10% 20%, rgba(56, 189, 248, 0.08), transparent 34%),
-      radial-gradient(circle at 90% 12%, rgba(99, 102, 241, 0.1), transparent 28%);
+    @apply min-h-screen bg-background text-foreground;
+    background-image: linear-gradient(
+      160deg,
+      hsl(214 33% 97%) 0%,
+      hsl(192 26% 96%) 45%,
+      hsl(0 0% 99%) 100%
+    );
+    background-attachment: fixed;
+  }
+}
+
+@layer components {
+  .card-subtle {
+    @apply rounded-xl border border-border/70 bg-card shadow-sm;
+  }
+
+  .focus-ring {
+    @apply outline-none ring-2 ring-primary/40 ring-offset-1;
   }
 }

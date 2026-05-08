@@ -1,5 +1,6 @@
 import Redis from "ioredis";
 import { config } from "./config.js";
+import { logWarn } from "./logger.js";
 
 export const redis = new Redis(config.redisUrl, {
   lazyConnect: true,
@@ -9,8 +10,7 @@ export const redis = new Redis(config.redisUrl, {
 export async function connectRedis() {
   try {
     await redis.connect();
-    console.log("Redis connected");
   } catch (error) {
-    console.warn("Redis unavailable, continuing without cache:", error.message);
+    logWarn("cache_unavailable", { message: error.message });
   }
 }

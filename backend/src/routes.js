@@ -19,6 +19,7 @@ import {
   fsWriteFile,
   listDirectories,
   readTextFile,
+  resolveSafePath,
   writeTextFile
 } from "./structure.js";
 import { registerFsEventStream } from "./fsEvents.js";
@@ -33,12 +34,36 @@ import {
 import { summarizeCodebaseWithCodex } from "./codexCodebaseSummary.js";
 import { getCodebaseSummaryJob, startCodebaseSummaryJob } from "./analysisJobs.js";
 import {
+  addSummaryAsProject,
   getCodebaseSummaryById,
   getLearningProfile,
   listCodebaseSummaries,
+  listProjectCodebaseSummaries,
   listImprovementSuggestions,
   saveCodebaseSummary
 } from "./analysisStore.js";
+import { listReferenceRepos } from "./referenceRepos.js";
+import {
+  cancelLearningJob,
+  createSource,
+  createSourcesBatch,
+  createWebsiteSource,
+  createWebsitesBatch,
+  debugMindQuery,
+  deleteSkill,
+  deleteSource,
+  getLearningJob,
+  getMlStatus,
+  getSkill,
+  learnSnippet,
+  listLearningJobs,
+  listSkills,
+  listSources,
+  registerMlJobEvents,
+  startLearningJob,
+  updateSkill,
+  updateSource
+} from "./mlMind.js";
 import { fail, ok } from "./response.js";
 import { NotFoundError, ValidationError } from "./errors.js";
 
@@ -47,7 +72,8 @@ const projectSchema = z.object({
   goals: z.string().min(5),
   techStack: z.string().optional().default(""),
   timeline: z.string().optional().default(""),
-  budget: z.string().optional().default("")
+  budget: z.string().optional().default(""),
+  rootPath: z.string().optional().default("")
 });
 
 const feedbackSchema = z.object({
@@ -105,18 +131,70 @@ const fsBatchSchema = z.object({
 const summarizeSchema = z.object({
   targetPath: z.string().min(1)
 });
+const importProjectSchema = z.object({
+  targetPath: z.string().min(1)
+});
 const rootQuerySchema = z.object({
   rootPath: z.string().optional().default("")
 });
 const codeJobSchema = z.object({
-  rootPath: z.string().min(1),
+  projectId: z.number().int().positive().optional(),
+  rootPath: z.string().optional().default(""),
   userPrompt: z.string().min(1)
+}).refine((data) => data.projectId || data.rootPath.trim(), {
+  message: "projectId or rootPath is required",
+  path: ["projectId"]
+});
+const mlSourceSchema = z.object({
+  url: z.string().min(1)
+});
+const mlSourcesBatchSchema = z.object({
+  urls: z.union([z.array(z.string()), z.string()]).optional(),
+  text: z.string().optional()
+}).refine((data) => data.urls || data.text, {
+  message: "urls or text is required"
+});
+const mlWebsiteSchema = z.object({
+  url: z.string().min(1),
+  maxPages: z.number().int().min(1).max(100).optional(),
+  maxDepth: z.number().int().min(0).max(5).optional()
+});
+const mlWebsitesBatchSchema = z.object({
+  urls: z.union([z.array(z.string()), z.string()]).optional(),
+  text: z.string().optional(),
+  maxPages: z.number().int().min(1).max(100).optional(),
+  maxDepth: z.number().int().min(0).max(5).optional()
+}).refine((data) => data.urls || data.text, {
+  message: "urls or text is required"
+});
+const mlSnippetSchema = z.object({
+  title: z.string().optional().default("Pasted Code Skill"),
+  language: z.string().optional().default("JavaScript"),
+  content: z.string().min(1)
+});
+const mlPatchSchema = z.object({
+  enabled: z.boolean().optional(),
+  name: z.string().optional()
+});
+const mlSkillPatchSchema = z.object({
+  enabled: z.boolean().optional()
+});
+const mlQuerySchema = z.object({
+  prompt: z.string().min(1),
+  deep: z.boolean().optional().default(false)
 });
 
 function parseIntParam(value, label) {
   const n = Number(value);
   if (!Number.isInteger(n) || n <= 0) throw new ValidationError(`${label} must be a positive integer`);
   return n;
+}
+
+function parsePerformanceRunType(value) {
+  const type = String(value || "").trim();
+  if (!type) return "";
+  if (["code_prompt", "analyzer_summary"].includes(type)) return type;
+  throw new ValidationError("type must be code_prompt or analyzer_summary");
 }
 
 function normalizeError(error) {
@@ -126,6 +204,24 @@ function normalizeError(error) {
     code: "INTERNAL_ERROR",
     message: error?.message || "Unknown error",
     details: null
+  };
+}
+
+function normalizeProjectRoot(rootPath) {
+  const value = String(rootPath || "").trim();
+  return value ? resolveSafePath(value) : "";
+}
+
+function importedProjectPayload(rootPath) {
+  const parts = rootPath.split(/[\\/]+/).filter(Boolean);
+  const name = parts[parts.length - 1] || "Imported Codebase";
+  return {
+    name,
+    goals: `Imported existing codebase from ${rootPath}. Run KiraAI Analyzer to generate summary, project metadata, improvements, and learning data.`,
+    techStack: "Pending analyzer run",
+    timeline: "Existing codebase - ongoing",
+    budget: "N/A",
+    rootPath
   };
 }
 
@@ -142,17 +238,164 @@ export const router = express.Router();
 
 router.get("/health", (_req, res) => ok(res, { ok: true }));
 
+router.get("/code-reference-repos", (_req, res) => ok(res, listReferenceRepos()));
+
+router.get("/ml/status", (_req, res) =>
+  routeGuard(res, async () => ok(res, await getMlStatus()))
+);
+
+router.get("/ml/sources", (_req, res) =>
+  routeGuard(res, async () => ok(res, await listSources({ includeArchived: _req.query.includeArchived === "true" })))
+);
+
+router.post("/ml/sources", (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = mlSourceSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid ML source payload", parsed.error.flatten());
+    return ok(res, await createSource(parsed.data.url, { autoLearn: true }), null, 201);
+  })
+);
+
+router.post("/ml/sources/batch", (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = mlSourcesBatchSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid ML sources batch payload", parsed.error.flatten());
+    return ok(res, await createSourcesBatch(parsed.data.urls || parsed.data.text, { autoLearn: true }), null, 201);
+  })
+);
+
+router.post("/ml/websites", (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = mlWebsiteSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid ML website payload", parsed.error.flatten());
+    return ok(res, await createWebsiteSource(parsed.data.url, {
+      autoLearn: true,
+      maxPages: parsed.data.maxPages,
+      maxDepth: parsed.data.maxDepth
+    }), null, 201);
+  })
+);
+
+router.post("/ml/websites/batch", (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = mlWebsitesBatchSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid ML websites batch payload", parsed.error.flatten());
+    return ok(res, await createWebsitesBatch(parsed.data.urls || parsed.data.text, {
+      autoLearn: true,
+      maxPages: parsed.data.maxPages,
+      maxDepth: parsed.data.maxDepth
+    }), null, 201);
+  })
+);
+
+router.post("/ml/snippets/learn", (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = mlSnippetSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid ML snippet payload", parsed.error.flatten());
+    return ok(res, await learnSnippet(parsed.data), null, 201);
+  })
+);
+
+router.patch("/ml/sources/:id", (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const parsed = mlPatchSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid ML source patch", parsed.error.flatten());
+    return ok(res, await updateSource(id, parsed.data));
+  })
+);
+
+router.delete("/ml/sources/:id", (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    return ok(res, await deleteSource(id));
+  })
+);
+
+router.post("/ml/sources/:id/learn", (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    return ok(res, await startLearningJob(id), null, 201);
+  })
+);
+
+router.get("/ml/jobs", (req, res) =>
+  routeGuard(res, async () => {
+    const limit = Number(req.query.limit || 30);
+    const offset = Number(req.query.offset || 0);
+    const includeFinished = req.query.includeFinished === "true";
+    return ok(res, await listLearningJobs(limit, offset, { includeFinished }), { limit, offset, includeFinished });
+  })
+);
+
+router.get("/ml/jobs/:id", (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    return ok(res, await getLearningJob(id));
+  })
+);
+
+router.get("/ml/jobs/:id/events", (req, res) => registerMlJobEvents(req, res));
+
+router.post("/ml/jobs/:id/cancel", (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    return ok(res, await cancelLearningJob(id));
+  })
+);
+
+router.get("/ml/skills", (req, res) =>
+  routeGuard(res, async () => {
+    const limit = Number(req.query.limit || 100);
+    const offset = Number(req.query.offset || 0);
+    const enabled = req.query.enabled ?? "";
+    return ok(res, await listSkills({ limit, offset, enabled }), { limit, offset });
+  })
+);
+
+router.get("/ml/skills/:id", (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    return ok(res, await getSkill(id));
+  })
+);
+
+router.patch("/ml/skills/:id", (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const parsed = mlSkillPatchSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid ML skill patch", parsed.error.flatten());
+    return ok(res, await updateSkill(id, parsed.data));
+  })
+);
+
+router.delete("/ml/skills/:id", (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    return ok(res, await deleteSkill(id));
+  })
+);
+
+router.post("/ml/query", (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = mlQuerySchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid ML query payload", parsed.error.flatten());
+    return ok(res, await debugMindQuery(parsed.data.prompt, { deep: parsed.data.deep }));
+  })
+);
+
 router.post("/projects", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = projectSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid project payload", parsed.error.flatten());
 
-    const { name, goals, techStack, timeline, budget } = parsed.data;
+    const { name, goals, techStack, timeline, budget, rootPath } = parsed.data;
+    const safeRootPath = normalizeProjectRoot(rootPath);
     const result = await query(
-      `INSERT INTO projects (name, goals, tech_stack, timeline, budget)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO projects (name, goals, tech_stack, timeline, budget, root_path)
+       VALUES ($1,$2,$3,$4,$5,$6)
        RETURNING *`,
-      [name, goals, techStack, timeline, budget]
+      [name, goals, techStack, timeline, budget, safeRootPath]
     );
     return ok(res, result.rows[0], null, 201);
   })
@@ -160,8 +403,66 @@ router.post("/projects", async (req, res) =>
 
 router.get("/projects", async (_req, res) =>
   routeGuard(res, async () => {
-    const result = await query("SELECT * FROM projects ORDER BY created_at DESC");
+    const result = await query(
+      `SELECT p.*,
+              latest.id AS source_summary_id,
+              latest.analysis_version AS source_analysis_version,
+              latest.created_at AS source_analysis_created_at,
+              latest.duration_ms AS source_analysis_duration_ms,
+              latest.model AS source_analysis_model,
+              latest_code.id AS latest_code_job_id,
+              latest_code.status AS latest_code_job_status,
+              latest_code.duration_ms AS latest_code_job_duration_ms,
+              latest_code.created_at AS latest_code_job_created_at,
+              latest_code.model AS latest_code_job_model
+       FROM projects p
+       LEFT JOIN LATERAL (
+         SELECT id, analysis_version, created_at, duration_ms, model
+         FROM codebase_summaries s
+         WHERE s.project_id = p.id OR (p.root_path <> '' AND s.root_path = p.root_path)
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) latest ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT id, status, duration_ms, created_at, model
+         FROM code_jobs c
+         WHERE c.project_id = p.id OR (p.root_path <> '' AND c.root_path = p.root_path)
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) latest_code ON TRUE
+       ORDER BY p.created_at DESC`
+    );
     return ok(res, result.rows);
+  })
+);
+
+router.post("/projects/import", async (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = importProjectSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid import payload", parsed.error.flatten());
+    const safeRootPath = normalizeProjectRoot(parsed.data.targetPath);
+    const payload = importedProjectPayload(safeRootPath);
+    const existing = await query("SELECT * FROM projects WHERE root_path=$1 LIMIT 1", [safeRootPath]);
+
+    if (existing.rowCount) {
+      const updated = await query(
+        `UPDATE projects
+         SET name=$1, goals=$2, tech_stack=$3, timeline=$4, budget=$5, root_path=$6, updated_at=NOW()
+         WHERE id=$7
+         RETURNING *`,
+        [payload.name, payload.goals, payload.techStack, payload.timeline, payload.budget, safeRootPath, existing.rows[0].id]
+      );
+      await redis.del(`project:${existing.rows[0].id}`).catch(() => null);
+      return ok(res, { project: updated.rows[0], created: false, updated: true });
+    }
+
+    const created = await query(
+      `INSERT INTO projects (name, goals, tech_stack, timeline, budget, root_path)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       RETURNING *`,
+      [payload.name, payload.goals, payload.techStack, payload.timeline, payload.budget, safeRootPath]
+    );
+    return ok(res, { project: created.rows[0], created: true, updated: false }, null, 201);
   })
 );
 
@@ -172,7 +473,36 @@ router.get("/projects/:id", async (req, res) =>
     const cached = await redis.get(cacheKey).catch(() => null);
     if (cached) return ok(res, JSON.parse(cached), { source: "cache" });
 
-    const project = await query("SELECT * FROM projects WHERE id=$1", [id]);
+    const project = await query(
+      `SELECT p.*,
+              latest.id AS source_summary_id,
+              latest.analysis_version AS source_analysis_version,
+              latest.created_at AS source_analysis_created_at,
+              latest.duration_ms AS source_analysis_duration_ms,
+              latest.model AS source_analysis_model,
+              latest_code.id AS latest_code_job_id,
+              latest_code.status AS latest_code_job_status,
+              latest_code.duration_ms AS latest_code_job_duration_ms,
+              latest_code.created_at AS latest_code_job_created_at,
+              latest_code.model AS latest_code_job_model
+       FROM projects p
+       LEFT JOIN LATERAL (
+         SELECT id, analysis_version, created_at, duration_ms, model
+         FROM codebase_summaries s
+         WHERE s.project_id = p.id OR (p.root_path <> '' AND s.root_path = p.root_path)
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) latest ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT id, status, duration_ms, created_at, model
+         FROM code_jobs c
+         WHERE c.project_id = p.id OR (p.root_path <> '' AND c.root_path = p.root_path)
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) latest_code ON TRUE
+       WHERE p.id=$1`,
+      [id]
+    );
     if (!project.rowCount) throw new NotFoundError("Project not found");
 
     const plans = await query(
@@ -185,19 +515,75 @@ router.get("/projects/:id", async (req, res) =>
   })
 );
 
+router.get("/projects/:id/performance-runs", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const type = parsePerformanceRunType(req.query.type);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 30)));
+    const projectResult = await query("SELECT * FROM projects WHERE id=$1", [id]);
+    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
+    const rootPath = projectResult.rows[0].root_path || "";
+
+    const rows = await query(
+      `SELECT *
+       FROM (
+         SELECT
+           'code_prompt' AS run_type,
+           c.id,
+           c.project_id,
+           c.root_path,
+           c.status,
+           c.model,
+           c.user_prompt AS title,
+           COALESCE(c.diff_summary, '') AS description,
+           c.started_at,
+           c.finished_at,
+           c.duration_ms,
+           c.stage_timings,
+           c.created_at
+         FROM code_jobs c
+         WHERE c.project_id=$1 OR ($2 <> '' AND c.root_path=$2)
+         UNION ALL
+         SELECT
+           'analyzer_summary' AS run_type,
+           s.id,
+           s.project_id,
+           s.root_path,
+           'done' AS status,
+           s.model,
+           s.title,
+           s.description,
+           s.started_at,
+           s.finished_at,
+           s.duration_ms,
+           s.stage_timings,
+           s.created_at
+         FROM codebase_summaries s
+         WHERE s.project_id=$1 OR ($2 <> '' AND s.root_path=$2)
+       ) runs
+       WHERE ($3 = '' OR run_type=$3)
+       ORDER BY created_at DESC
+       LIMIT $4`,
+      [id, rootPath, type, limit]
+    );
+    return ok(res, rows.rows, { projectId: id, type, limit });
+  })
+);
+
 router.put("/projects/:id", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
     const parsed = projectSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid project payload", parsed.error.flatten());
 
-    const { name, goals, techStack, timeline, budget } = parsed.data;
+    const { name, goals, techStack, timeline, budget, rootPath } = parsed.data;
+    const safeRootPath = normalizeProjectRoot(rootPath);
     const result = await query(
       `UPDATE projects
-       SET name=$1, goals=$2, tech_stack=$3, timeline=$4, budget=$5, updated_at=NOW()
-       WHERE id=$6
+       SET name=$1, goals=$2, tech_stack=$3, timeline=$4, budget=$5, root_path=$6, updated_at=NOW()
+       WHERE id=$7
        RETURNING *`,
-      [name, goals, techStack, timeline, budget, id]
+      [name, goals, techStack, timeline, budget, safeRootPath, id]
     );
     if (!result.rowCount) throw new NotFoundError("Project not found");
     await redis.del(`project:${id}`).catch(() => null);
@@ -211,6 +597,18 @@ router.delete("/projects/:id", async (req, res) =>
     await query("DELETE FROM projects WHERE id=$1", [id]);
     await redis.del(`project:${id}`).catch(() => null);
     return ok(res, { deleted: true, id });
+  })
+);
+
+router.get("/projects/:id/analysis-summaries", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const limit = Number(req.query.limit || 40);
+    const offset = Number(req.query.offset || 0);
+    const projectResult = await query("SELECT * FROM projects WHERE id=$1", [id]);
+    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
+    const items = await listProjectCodebaseSummaries(projectResult.rows[0], limit, offset);
+    return ok(res, items, { limit, offset, projectId: id });
   })
 );
 
@@ -523,7 +921,7 @@ router.post("/analysis/summarize-codebase", async (req, res) =>
     if (!parsed.success) throw new ValidationError("Invalid summarize payload", parsed.error.flatten());
     const data = await summarizeCodebaseWithCodex(parsed.data.targetPath);
     const saved = await saveCodebaseSummary(data);
-    return ok(res, { ...data, summaryId: saved.id });
+    return ok(res, { ...data, summaryId: saved.id, analysisVersion: saved.analysisVersion, projectId: saved.projectId });
   })
 );
 
@@ -568,6 +966,26 @@ router.get("/analysis/summarize-codebase/jobs/:jobId", async (req, res) =>
   })
 );
 
+router.post("/projects/:id/analyze-codebase/start", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const projectResult = await query("SELECT * FROM projects WHERE id=$1", [id]);
+    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
+    const project = projectResult.rows[0];
+    if (!project.root_path?.trim()) throw new ValidationError("Project does not have a root path. Import a folder first.");
+    await redis.del(`project:${id}`).catch(() => null);
+    const job = startCodebaseSummaryJob(project.root_path, { projectId: project.id });
+    return ok(res, {
+      jobId: job.jobId,
+      status: job.status,
+      progress: job.progress,
+      stage: job.stage,
+      message: job.message,
+      projectId: project.id
+    });
+  })
+);
+
 router.get("/analysis/summaries", async (req, res) =>
   routeGuard(res, async () => {
     const limit = Number(req.query.limit || 20);
@@ -583,6 +1001,16 @@ router.get("/analysis/summaries/:id", async (req, res) =>
     const item = await getCodebaseSummaryById(id);
     if (!item) throw new NotFoundError("Summary not found");
     return ok(res, item);
+  })
+);
+
+router.post("/analysis/summaries/:id/add-as-project", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const result = await addSummaryAsProject(id);
+    if (!result) throw new NotFoundError("Summary not found");
+    await redis.del(`project:${result.project.id}`).catch(() => null);
+    return ok(res, result);
   })
 );
 
@@ -648,6 +1076,6 @@ router.post("/analysis/check-improvements", async (req, res) =>
     if (!parsed.success) throw new ValidationError("Invalid improvement check payload", parsed.error.flatten());
     const data = await summarizeCodebaseWithCodex(parsed.data.targetPath);
     const saved = await saveCodebaseSummary(data);
-    return ok(res, { ...data, summaryId: saved.id, improvementChecks: saved.improvementChecks || [] });
+    return ok(res, { ...data, summaryId: saved.id, analysisVersion: saved.analysisVersion, projectId: saved.projectId, improvementChecks: saved.improvementChecks || [] });
   })
 );
