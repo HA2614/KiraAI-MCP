@@ -5,6 +5,8 @@ import {
   apiPut,
   applyCodeJob,
   createCodeJob,
+  createCodeStructureJob,
+  createProjectFolder,
   fsCopy,
   fsCreateFile,
   fsDeletePath,
@@ -20,6 +22,7 @@ import {
   healthCheck,
   importProject,
   listCodeJobs,
+  listProjectCodeJobs,
   openCodeJobEvents,
   openFsEvents,
   rejectCodeJob
@@ -278,6 +281,8 @@ export default function App() {
   const [codeSessions, setCodeSessions] = useState({});
   const [codeSessionsHydrated, setCodeSessionsHydrated] = useState(false);
   const [codeLearningProfile, setCodeLearningProfile] = useState(null);
+  const [codeHistory, setCodeHistory] = useState([]);
+  const [codeHistoryBusy, setCodeHistoryBusy] = useState(false);
 
   const selectedLatestPlan = selectedProject?.plans?.[0] || null;
   const selectedCodeProject = useMemo(
@@ -435,6 +440,14 @@ export default function App() {
       .catch(() => setCodeLearningProfile(null));
   }, [selectedCodeProject?.root_path]);
 
+  useEffect(() => {
+    if (!codeProjectId) {
+      setCodeHistory([]);
+      return;
+    }
+    loadCodeHistory(codeProjectId).catch(() => null);
+  }, [codeProjectId]);
+
   async function checkConnection({ silent = false } = {}) {
     const started = Date.now();
     if (!silent) {
@@ -569,6 +582,26 @@ export default function App() {
     }
   }
 
+  async function loadCodeHistory(projectId = codeProjectId, options = {}) {
+    if (!projectId) {
+      setCodeHistory([]);
+      return [];
+    }
+    setCodeHistoryBusy(true);
+    try {
+      const rows = await listProjectCodeJobs(projectId, {
+        limit: options.limit || 40,
+        offset: options.offset || 0,
+        status: options.status || "",
+        type: options.type || ""
+      });
+      setCodeHistory(rows);
+      return rows;
+    } finally {
+      setCodeHistoryBusy(false);
+    }
+  }
+
   function updateCodeSession(projectId, updater) {
     const key = projectKey(projectId);
     if (!key) return;
@@ -597,6 +630,21 @@ export default function App() {
     const nextProjectId = codeJobProjectId(job) || projectId;
     mergeJobIntoCodeSession(nextProjectId, job, options);
     return job;
+  }
+
+  async function openCodeHistoryJob(jobId) {
+    setError("");
+    setNotice("");
+    try {
+      const job = await getCodeJob(jobId);
+      const projectId = codeJobProjectId(job) || codeProjectId;
+      if (projectId) setCodeProjectId(projectId);
+      mergeJobIntoCodeSession(projectId, job, { restored: true });
+      return job;
+    } catch (err) {
+      setError(err.message || "Failed to open KiraAI history item");
+      return null;
+    }
   }
 
   async function restoreCodeWorkerSessions() {
@@ -704,6 +752,33 @@ export default function App() {
       return result.project;
     } catch (err) {
       setError(err.message || "Failed to import project");
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createWorkspaceProject(payload) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await createProjectFolder(payload);
+      await refreshProjects();
+      const project = await refreshSelectedProject(result.project.id);
+      setAnalysisProjectId(result.project.id);
+      setCodeProjectId(result.project.id);
+      await loadProjectSummaries(result.project.id);
+      const rootPath = project?.root_path || result.rootPath;
+      if (rootPath) {
+        setSettings((prev) => ({ ...prev, targetPath: rootPath }));
+        setCurrentPath(rootPath);
+        setExplorerLoaded(false);
+      }
+      setNotice(`Project created: ${result.project.name} at ${rootPath}.`);
+      return result.project;
+    } catch (err) {
+      setError(err.message || "Failed to create project folder");
       return null;
     } finally {
       setBusy(false);
@@ -925,6 +1000,7 @@ export default function App() {
     try {
       const job = await createCodeJob(Number(selectedCodeProject.id), prompt);
       mergeJobIntoCodeSession(selectedCodeProject.id, job);
+      await loadCodeHistory(selectedCodeProject.id).catch(() => null);
       const latest = await getCodeJob(job.id);
       mergeJobIntoCodeSession(selectedCodeProject.id, latest);
     } catch (err) {
@@ -936,16 +1012,52 @@ export default function App() {
     }
   }
 
+  async function startCodeStructureWorker(payload = {}) {
+    if (!selectedCodeProject?.id || !selectedCodeProject?.root_path) {
+      setError("Select a project with a workspace root before creating structure.");
+      return null;
+    }
+    setError("");
+    setNotice("");
+    updateCodeSession(selectedCodeProject.id, {
+      busy: true,
+      logs: [],
+      restored: false,
+      terminalStatus: "connecting",
+      lastLogAt: null
+    });
+    try {
+      const job = await createCodeStructureJob(Number(selectedCodeProject.id), {
+        preset: "full_stack",
+        instructions: payload.instructions || ""
+      });
+      mergeJobIntoCodeSession(selectedCodeProject.id, job);
+      await loadCodeHistory(selectedCodeProject.id).catch(() => null);
+      const latest = await getCodeJob(job.id);
+      mergeJobIntoCodeSession(selectedCodeProject.id, latest);
+      return latest;
+    } catch (err) {
+      setError(err.message || "Failed to start structure workflow");
+      updateCodeSession(selectedCodeProject.id, {
+        busy: false,
+        terminalStatus: "idle"
+      });
+      return null;
+    }
+  }
+
   async function applyCurrentCodeJob() {
     if (!codeJob?.id) return;
     const updated = await applyCodeJob(codeJob.id);
     mergeJobIntoCodeSession(codeJobProjectId(updated) || codeProjectId, updated);
+    await loadCodeHistory(codeJobProjectId(updated) || codeProjectId).catch(() => null);
   }
 
   async function rejectCurrentCodeJob() {
     if (!codeJob?.id) return;
     const updated = await rejectCodeJob(codeJob.id);
     mergeJobIntoCodeSession(codeJobProjectId(updated) || codeProjectId, updated);
+    await loadCodeHistory(codeJobProjectId(updated) || codeProjectId).catch(() => null);
   }
 
   function resetCodeWorker() {
@@ -980,12 +1092,12 @@ export default function App() {
           <AlertDescription>{notice}</AlertDescription>
         </Alert>
       ) : null}
-      {tab === "projects" ? <ProjectsView busy={busy} projects={projects} refreshProjects={refreshProjects} openProject={openProject} updateProjectRoot={updateProjectRoot} importExistingProject={importExistingProject} defaultTargetPath={settings.targetPath} performanceProjectId={performanceProjectId} performanceRuns={performanceRuns} performanceBusy={performanceBusy} loadProjectPerformanceRuns={loadProjectPerformanceRuns} /> : null}
+      {tab === "projects" ? <ProjectsView busy={busy} projects={projects} refreshProjects={refreshProjects} openProject={openProject} updateProjectRoot={updateProjectRoot} importExistingProject={importExistingProject} createWorkspaceProject={createWorkspaceProject} defaultTargetPath={settings.targetPath} performanceProjectId={performanceProjectId} performanceRuns={performanceRuns} performanceBusy={performanceBusy} loadProjectPerformanceRuns={loadProjectPerformanceRuns} /> : null}
       {tab === "plans" ? <PlansView selectedProjectId={selectedProjectId} selectedLatestJson={selectedLatestJson} selectedLatestPlan={selectedLatestPlan} sortedMilestones={sortedMilestones} settings={settings} refreshSelectedProject={refreshSelectedProject} loadHistory={loadHistory} updateFeedback={updateFeedback} promoteBaseline={promoteBaseline} historyFilter={historyFilter} setHistoryFilter={setHistoryFilter} historyRows={historyRows} compareVersion={compareVersion} setCompareVersion={setCompareVersion} runCompare={runCompare} compareResult={compareResult} generatePlan={generatePlan} /> : null}
       {tab === "structure" ? <StructureView settings={settings} setSettings={setSettings} runStructure={runStructure} selectedProjectId={selectedProjectId} structureResult={structureResult} /> : null}
       {tab === "explorer" ? <ExplorerView parentPath={parentPath} loadExplorer={loadExplorer} navigateExplorer={navigateExplorer} goBack={goExplorerBack} goForward={goExplorerForward} canGoBack={explorerBackStack.length > 0} canGoForward={explorerForwardStack.length > 0} currentPath={currentPath} entries={entries} tree={tree} openEntry={openEntry} selectedPaths={selectedPaths} toggleSelect={toggleSelect} openFilePath={openFilePath} setOpenFilePath={setOpenFilePath} openFileContent={openFileContent} setOpenFileContent={setOpenFileContent} dirtyFile={dirtyFile} setDirtyFile={setDirtyFile} saveFile={saveFile} fsConnected={fsConnected} createFolder={createFolder} createFile={createFile} renameSelected={renameSelected} deleteSelected={deleteSelected} copySelected={copySelected} moveSelected={moveSelected} filter={filter} setFilter={setFilter} /> : null}
       {tab === "analyzer" ? <AnalyzerView projects={projects} selectedProjectId={analysisProjectId} setSelectedProjectId={setAnalysisProjectId} runCodebaseSummary={runCodebaseSummary} analysisBusy={analysisBusy} analysisJob={analysisJob} analysisResult={analysisResult} projectSummaries={projectSummaries} loadProjectSummaries={loadProjectSummaries} setAnalysisResult={(data) => setAnalysisResult(normalizeSummaryResult(data))} setError={setError} getSummaryById={getSummaryById} /> : null}
-      {tab === "code" ? <CodeWorkerView projects={projects} sessionsByProject={codeSessions} selectedProject={selectedCodeProject} selectedProjectId={codeProjectId} setSelectedProjectId={setCodeProjectId} codePrompt={codePrompt} setCodePrompt={setCurrentCodePrompt} codeJob={codeJob} codeBusy={codeBusy} codeLogs={codeLogs} terminalStatus={codeTerminalStatus} lastLogAt={codeLastLogAt} learningProfile={codeLearningProfile} codeSessionRestored={codeSessionRestored} startCodeWorker={startCodeWorker} applyCurrentCodeJob={applyCurrentCodeJob} rejectCurrentCodeJob={rejectCurrentCodeJob} resetCodeWorker={resetCodeWorker} /> : null}
+      {tab === "code" ? <CodeWorkerView projects={projects} sessionsByProject={codeSessions} selectedProject={selectedCodeProject} selectedProjectId={codeProjectId} setSelectedProjectId={setCodeProjectId} codePrompt={codePrompt} setCodePrompt={setCurrentCodePrompt} codeJob={codeJob} codeBusy={codeBusy} codeLogs={codeLogs} terminalStatus={codeTerminalStatus} lastLogAt={codeLastLogAt} learningProfile={codeLearningProfile} codeSessionRestored={codeSessionRestored} codeHistory={codeHistory} codeHistoryBusy={codeHistoryBusy} loadCodeHistory={loadCodeHistory} openCodeHistoryJob={openCodeHistoryJob} startCodeWorker={startCodeWorker} startCodeStructureWorker={startCodeStructureWorker} applyCurrentCodeJob={applyCurrentCodeJob} rejectCurrentCodeJob={rejectCurrentCodeJob} resetCodeWorker={resetCodeWorker} /> : null}
       {tab === "settings" ? <SettingsView settings={settings} setSettings={setSettings} savedDefaultPath={savedDefaultPath} saveDefaultSettings={saveDefaultSettings} /> : null}
     </AppShell>
   );

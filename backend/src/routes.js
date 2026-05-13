@@ -1,8 +1,11 @@
 import express from "express";
+import { mkdir, stat } from "node:fs/promises";
+import path from "node:path";
 import { z } from "zod";
 import { query } from "./db.js";
 import { redis } from "./cache.js";
 import { generatePlan } from "./ai.js";
+import { config } from "./config.js";
 import {
   generateProjectStructure,
   fsBatch,
@@ -27,9 +30,11 @@ import {
   applyCodeJob,
   getCodeJob,
   listCodeJobs,
+  listProjectCodeJobs,
   registerCodeJobEvents,
   rejectCodeJob,
-  startCodeJob
+  startCodeJob,
+  startStructureCodeJob
 } from "./codeJobs.js";
 import { summarizeCodebaseWithCodex } from "./codexCodebaseSummary.js";
 import { getCodebaseSummaryJob, startCodebaseSummaryJob } from "./analysisJobs.js";
@@ -134,6 +139,14 @@ const summarizeSchema = z.object({
 const importProjectSchema = z.object({
   targetPath: z.string().min(1)
 });
+const createProjectFolderSchema = z.object({
+  name: z.string().min(2),
+  basePath: z.string().optional().default(""),
+  goals: z.string().optional().default(""),
+  techStack: z.string().optional().default(""),
+  timeline: z.string().optional().default(""),
+  budget: z.string().optional().default("")
+});
 const rootQuerySchema = z.object({
   rootPath: z.string().optional().default("")
 });
@@ -144,6 +157,16 @@ const codeJobSchema = z.object({
 }).refine((data) => data.projectId || data.rootPath.trim(), {
   message: "projectId or rootPath is required",
   path: ["projectId"]
+});
+const codeJobHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional().default(30),
+  offset: z.coerce.number().int().min(0).optional().default(0),
+  status: z.enum(["", "queued", "planning", "running", "awaiting_review", "applied", "rejected", "failed"]).optional().default(""),
+  type: z.enum(["", "prompt", "structure"]).optional().default("")
+});
+const codeStructureJobSchema = z.object({
+  preset: z.enum(["full_stack"]).optional().default("full_stack"),
+  instructions: z.string().optional().default("")
 });
 const mlSourceSchema = z.object({
   url: z.string().min(1)
@@ -210,6 +233,36 @@ function normalizeError(error) {
 function normalizeProjectRoot(rootPath) {
   const value = String(rootPath || "").trim();
   return value ? resolveSafePath(value) : "";
+}
+
+function projectFolderSlug(value) {
+  return String(value || "project")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 70) || "project";
+}
+
+async function pathExists(targetPath) {
+  try {
+    await stat(targetPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function nextAvailableProjectFolder(basePath, projectName) {
+  const parent = normalizeProjectRoot(basePath || config.fsBasePath);
+  const slug = projectFolderSlug(projectName);
+  for (let index = 0; index < 1000; index += 1) {
+    const suffix = index === 0 ? "" : `-${index + 1}`;
+    const candidate = normalizeProjectRoot(path.join(parent, `${slug}${suffix}`));
+    if (!(await pathExists(candidate))) return { parent, rootPath: candidate };
+  }
+  throw new ValidationError("Could not find an available project folder name");
 }
 
 function importedProjectPayload(rootPath) {
@@ -466,6 +519,33 @@ router.post("/projects/import", async (req, res) =>
   })
 );
 
+router.post("/projects/create-folder", async (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = createProjectFolderSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid project folder payload", parsed.error.flatten());
+
+    const { name, basePath, goals, techStack, timeline, budget } = parsed.data;
+    const folder = await nextAvailableProjectFolder(basePath, name);
+    await mkdir(folder.rootPath, { recursive: false });
+
+    const projectGoals = goals.trim() || `Workspace project created in ${folder.rootPath}. Use KiraAI Analyzer or Code Worker to build from this folder.`;
+    const result = await query(
+      `INSERT INTO projects (name, goals, tech_stack, timeline, budget, root_path)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       RETURNING *`,
+      [
+        name.trim(),
+        projectGoals,
+        techStack.trim() || "Pending project setup",
+        timeline.trim() || "New workspace project",
+        budget.trim() || "N/A",
+        folder.rootPath
+      ]
+    );
+    return ok(res, { project: result.rows[0], rootPath: folder.rootPath, parent: folder.parent, created: true }, null, 201);
+  })
+);
+
 router.get("/projects/:id", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
@@ -567,6 +647,27 @@ router.get("/projects/:id/performance-runs", async (req, res) =>
       [id, rootPath, type, limit]
     );
     return ok(res, rows.rows, { projectId: id, type, limit });
+  })
+);
+
+router.get("/projects/:id/code-jobs", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const parsed = codeJobHistoryQuerySchema.safeParse(req.query);
+    if (!parsed.success) throw new ValidationError("Invalid code job history query", parsed.error.flatten());
+    const projectResult = await query("SELECT id FROM projects WHERE id=$1", [id]);
+    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
+    const items = await listProjectCodeJobs(id, parsed.data);
+    return ok(res, items, { projectId: id, ...parsed.data });
+  })
+);
+
+router.post("/projects/:id/code-structure-jobs", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const parsed = codeStructureJobSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid code structure job payload", parsed.error.flatten());
+    return ok(res, await startStructureCodeJob({ projectId: id, ...parsed.data }), null, 201);
   })
 );
 

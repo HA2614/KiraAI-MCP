@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Bot, CheckCircle2, Clock3, GitPullRequest, Play, Search, ShieldAlert, TerminalSquare, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, Clock3, GitPullRequest, History, Layers3, Play, Search, ShieldAlert, TerminalSquare, XCircle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,7 +28,12 @@ export function CodeWorkerView({
   lastLogAt,
   learningProfile,
   codeSessionRestored,
+  codeHistory = [],
+  codeHistoryBusy = false,
+  loadCodeHistory,
+  openCodeHistoryJob,
   startCodeWorker,
+  startCodeStructureWorker,
   applyCurrentCodeJob,
   rejectCurrentCodeJob,
   resetCodeWorker
@@ -36,6 +41,8 @@ export function CodeWorkerView({
   const [query, setQuery] = useState("");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [nowMs, setNowMs] = useState(Date.now());
+  const [historyType, setHistoryType] = useState("");
+  const [structureInstructions, setStructureInstructions] = useState("");
   const files = Array.isArray(codeJob?.changed_files) ? codeJob.changed_files : [];
   const risks = Array.isArray(codeJob?.risk_notes) ? codeJob.risk_notes : [];
   const tests = Array.isArray(codeJob?.test_commands) ? codeJob.test_commands : [];
@@ -71,53 +78,124 @@ export function CodeWorkerView({
   }, [codeJob?.id]);
 
   useEffect(() => {
+    setHistoryType("");
+  }, [selectedProjectId]);
+
+  useEffect(() => {
     if (!hasActiveJob && !codeJob?.started_at) return undefined;
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [hasActiveJob, codeJob?.started_at]);
 
+  async function refreshHistory(nextType = historyType) {
+    if (!selectedProjectId || !loadCodeHistory) return;
+    setHistoryType(nextType);
+    await loadCodeHistory(selectedProjectId, { type: nextType });
+  }
+
+  async function startStructure() {
+    const job = await startCodeStructureWorker?.({ instructions: structureInstructions.trim() });
+    if (job) setStructureInstructions("");
+  }
+
   return (
     <div className="grid min-h-[calc(100vh-6.5rem)] w-full gap-3 xl:grid-cols-[340px_minmax(680px,1fr)_460px] 2xl:grid-cols-[380px_minmax(860px,1fr)_520px]">
-      <Card className="flex min-h-[520px] flex-col overflow-hidden xl:h-[calc(100vh-6.5rem)]">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <GitPullRequest className="h-4 w-4" />
-            Projects
-          </CardTitle>
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input className="pl-8" placeholder="Search projects..." value={query} onChange={(event) => setQuery(event.target.value)} />
-          </div>
-        </CardHeader>
-        <CardContent className="min-h-0 flex-1 p-0">
-          <ScrollArea className="h-full px-3 pb-3">
-            <div className="grid gap-2">
-              {filteredProjects.map((project) => {
-                const active = Number(project.id) === Number(selectedProjectId);
-                const session = sessionsByProject[String(project.id)] || {};
-                const sessionStatus = projectSessionStatus(project, session);
-                return (
+      <div className="grid min-h-[620px] gap-3 xl:h-[calc(100vh-6.5rem)] xl:grid-rows-[minmax(260px,0.9fr)_minmax(260px,1.1fr)]">
+        <Card className="flex min-h-0 flex-col overflow-hidden">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <GitPullRequest className="h-4 w-4" />
+              Projects
+            </CardTitle>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input className="pl-8" placeholder="Search projects..." value={query} onChange={(event) => setQuery(event.target.value)} />
+            </div>
+          </CardHeader>
+          <CardContent className="min-h-0 flex-1 p-0">
+            <ScrollArea className="h-full px-3 pb-3">
+              <div className="grid gap-2">
+                {filteredProjects.map((project) => {
+                  const active = Number(project.id) === Number(selectedProjectId);
+                  const session = sessionsByProject[String(project.id)] || {};
+                  const sessionStatus = projectSessionStatus(project, session);
+                  return (
+                    <button
+                      key={project.id}
+                      onClick={() => setSelectedProjectId(project.id)}
+                      className={cn(
+                        "rounded-lg border p-3 text-left text-sm transition hover:border-primary/50 hover:bg-secondary/40",
+                        active && "border-primary bg-primary/10"
+                      )}
+                    >
+                      <div className="flex min-w-0 items-start gap-2">
+                        <span className="min-w-0 flex-1 break-words font-medium leading-snug">#{project.id} {project.name}</span>
+                        <Badge variant={sessionStatus.variant} className="shrink-0">{sessionStatus.label}</Badge>
+                      </div>
+                      <div className="mt-1 line-clamp-2 break-all text-xs text-muted-foreground">{project.root_path || "Set a root path in Projects first"}</div>
+                    </button>
+                  );
+                })}
+                {!filteredProjects.length ? <p className="rounded-lg border p-3 text-sm text-muted-foreground">No projects found.</p> : null}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+
+        <Card className="flex min-h-0 flex-col overflow-hidden">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <History className="h-4 w-4" />
+                Prompt History
+              </CardTitle>
+              <Button size="sm" variant="outline" onClick={() => refreshHistory()} disabled={!selectedProjectId || codeHistoryBusy}>
+                Refresh
+              </Button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[
+                ["", "All"],
+                ["prompt", "Prompts"],
+                ["structure", "Structure"]
+              ].map(([value, label]) => (
+                <Button key={value || "all"} size="sm" variant={historyType === value ? "default" : "outline"} onClick={() => refreshHistory(value)} disabled={!selectedProjectId || codeHistoryBusy}>
+                  {label}
+                </Button>
+              ))}
+            </div>
+          </CardHeader>
+          <CardContent className="min-h-0 flex-1 p-0">
+            <ScrollArea className="h-full px-3 pb-3">
+              <div className="grid gap-2">
+                {codeHistory.map((job) => (
                   <button
-                    key={project.id}
-                    onClick={() => setSelectedProjectId(project.id)}
+                    key={job.id}
+                    onClick={() => openCodeHistoryJob?.(job.id)}
                     className={cn(
                       "rounded-lg border p-3 text-left text-sm transition hover:border-primary/50 hover:bg-secondary/40",
-                      active && "border-primary bg-primary/10"
+                      Number(codeJob?.id) === Number(job.id) && "border-primary bg-primary/10"
                     )}
                   >
-                    <div className="flex min-w-0 items-start gap-2">
-                      <span className="min-w-0 flex-1 break-words font-medium leading-snug">#{project.id} {project.name}</span>
-                      <Badge variant={sessionStatus.variant} className="shrink-0">{sessionStatus.label}</Badge>
+                    <div className="flex min-w-0 items-start justify-between gap-2">
+                      <span className="min-w-0 line-clamp-2 font-medium">{job.title || job.user_prompt || `Job #${job.id}`}</span>
+                      <Badge variant={job.job_type === "structure" ? "secondary" : "outline"}>{job.job_type || "prompt"}</Badge>
                     </div>
-                    <div className="mt-1 line-clamp-2 break-all text-xs text-muted-foreground">{project.root_path || "Set a root path in Projects first"}</div>
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <Badge variant="outline">{job.status || "queued"}</Badge>
+                      {job.duration_ms ? <Badge variant="outline">{formatDurationMs(job.duration_ms)}</Badge> : null}
+                      <DiffStats additions={sumChanged(job.changed_files, "additions")} deletions={sumChanged(job.changed_files, "deletions")} />
+                    </div>
+                    <div className="mt-2 line-clamp-2 text-xs text-muted-foreground">{job.diff_summary || formatDate(job.created_at)}</div>
                   </button>
-                );
-              })}
-              {!filteredProjects.length ? <p className="rounded-lg border p-3 text-sm text-muted-foreground">No projects found.</p> : null}
-            </div>
-          </ScrollArea>
-        </CardContent>
-      </Card>
+                ))}
+                {codeHistoryBusy ? <p className="rounded-lg border p-3 text-sm text-muted-foreground">Loading history...</p> : null}
+                {!codeHistoryBusy && !codeHistory.length ? <p className="rounded-lg border p-3 text-sm text-muted-foreground">No KiraAI Code history for this project yet.</p> : null}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+      </div>
 
       <div className="grid min-h-[720px] grid-rows-[minmax(0,1fr)_260px] gap-3 xl:h-[calc(100vh-6.5rem)]">
         <Card className="min-h-0 overflow-hidden">
@@ -152,6 +230,42 @@ export function CodeWorkerView({
                   This project needs a workspace root before KiraAI can run. Set it from the Projects page.
                 </div>
               ) : null}
+            </div>
+
+            <div className="rounded-lg border bg-background p-3">
+              <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="flex items-center gap-2 text-sm font-semibold">
+                    <Layers3 className="h-4 w-4 text-primary" />
+                    Full-stack Structure Workflow
+                  </p>
+                  <p className="text-xs text-muted-foreground">Creates frontend, backend, API routes, database schema, Docker, env and README as a reviewable proposal.</p>
+                </div>
+                <Badge variant="secondary">reviewable</Badge>
+              </div>
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+                <Textarea
+                  className="min-h-[88px] resize-none text-sm"
+                  value={structureInstructions}
+                  onChange={(event) => setStructureInstructions(event.target.value)}
+                  placeholder="Optional structure instructions, e.g. use Express routes for users and files, include SQL migrations..."
+                  disabled={hasActiveJob && !finished}
+                />
+                <div className="grid content-start gap-2">
+                  <Button onClick={startStructure} disabled={!selectedProject?.root_path || codeBusy || hasActiveJob}>
+                    <Play className="mr-2 h-4 w-4" />
+                    Start Structure Job
+                  </Button>
+                  <div className="grid gap-1 text-xs text-muted-foreground">
+                    <span>Plan</span>
+                    <span>Query KiraAI skills</span>
+                    <span>Inspect project</span>
+                    <span>Generate proposal</span>
+                    <span>Collect diff</span>
+                    <span>Review</span>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_240px]">
@@ -506,6 +620,19 @@ function cleanTerminalText(value) {
     .replace(/postgres(?:ql)?:\/\/\S+/gi, "[database-url]")
     .replace(/\bDATABASE_URL=\S+/gi, "DATABASE_URL=[hidden]")
     .trim();
+}
+
+function sumChanged(files, key) {
+  return (Array.isArray(files) ? files : []).reduce((sum, file) => sum + Number(file?.[key] || 0), 0);
+}
+
+function formatDate(value) {
+  if (!value) return "No date";
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return String(value);
+  }
 }
 
 function formatDurationMs(value) {

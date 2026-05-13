@@ -15,6 +15,14 @@ Open:
 http://localhost:4000
 ```
 
+If host ports conflict, edit `.env`:
+
+```text
+APP_HOST_PORT=4000
+POSTGRES_HOST_PORT=5432
+REDIS_HOST_PORT=6379
+```
+
 ## Codex Authentication
 
 Docker installs the Codex CLI inside the app image. You do not need VS Code or a Codex extension.
@@ -72,9 +80,12 @@ Set secrets in `.env` or in your deployment secret manager:
 ```text
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
+CODE_JOB_TIMEOUT_MS=900000
 ```
 
 Do not commit `.env`.
+
+With the default Docker setup, Codex login is required for Code Worker, Analyzer, and ML skill extraction. OpenAI keys are optional unless you configure OpenAI as the active provider or embedding provider.
 
 ## Commands
 

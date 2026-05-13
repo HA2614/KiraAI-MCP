@@ -119,6 +119,9 @@ CREATE TABLE IF NOT EXISTS code_jobs (
   root_path TEXT NOT NULL,
   user_prompt TEXT NOT NULL,
   improved_prompt TEXT,
+  job_type TEXT NOT NULL DEFAULT 'prompt',
+  title TEXT,
+  request_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   model TEXT,
   status TEXT NOT NULL DEFAULT 'queued',
   logs JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -149,6 +152,9 @@ ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS interrupted_at TIMESTAMP;
 ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS runner_id TEXT;
 ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS resume_reason TEXT;
 ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS resume_state JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'prompt';
+ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS title TEXT;
+ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS request_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;
 ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP;
 ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
@@ -294,6 +300,7 @@ CREATE INDEX IF NOT EXISTS idx_ml_sources_archived ON ml_sources(archived);
 CREATE INDEX IF NOT EXISTS idx_ml_sources_type_hash ON ml_sources(source_type, input_hash);
 CREATE INDEX IF NOT EXISTS idx_code_jobs_status_resume ON code_jobs(status, resume_count, updated_at);
 CREATE INDEX IF NOT EXISTS idx_code_jobs_project_duration ON code_jobs(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_code_jobs_project_type_created ON code_jobs(project_id, job_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_codebase_summaries_project_duration ON codebase_summaries(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ml_learning_jobs_source_created ON ml_learning_jobs(source_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ml_learning_jobs_status_resume ON ml_learning_jobs(status, resume_count, updated_at);

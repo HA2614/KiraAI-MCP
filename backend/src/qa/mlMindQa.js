@@ -86,6 +86,38 @@ const QA_CASES = [
     expect: ["newsletter", "form", "email", "input", "submit", "button"],
     reject: ["contact form", "pricing", "profile card", "game", "portfolio"],
     minExpectedHits: 4
+  },
+  {
+    id: "express-route",
+    prompt: "Add an Express route for GET /api/users with validation and a controller handoff.",
+    expect: ["express", "route", "router", "api", "endpoint", "controller", "request", "response", "validation"],
+    reject: ["profile card", "pricing", "portfolio", "gallery", "newsletter", "game", "avatar", "social link"],
+    minExpectedHits: 3,
+    optionalUntilCorpusTerms: ["express", "router", "controller", "middleware"]
+  },
+  {
+    id: "rest-api-endpoint",
+    prompt: "Build a REST API endpoint for creating products and returning proper status codes.",
+    expect: ["rest", "api", "endpoint", "route", "status", "request", "response", "validation", "crud"],
+    reject: ["profile card", "pricing card", "gallery", "portfolio", "newsletter", "game"],
+    minExpectedHits: 3,
+    optionalUntilCorpusTerms: ["rest", "endpoint", "status code", "crud"]
+  },
+  {
+    id: "sql-schema-migration",
+    prompt: "Add a SQL schema migration with users and files tables, primary keys and foreign keys.",
+    expect: ["sql", "schema", "migration", "table", "primary key", "foreign key", "database"],
+    reject: ["profile card", "portfolio", "pricing", "gallery", "newsletter", "game"],
+    minExpectedHits: 3,
+    optionalUntilCorpusTerms: ["sql", "migration", "schema.sql", "foreign key", "postgres"]
+  },
+  {
+    id: "full-stack-scaffold",
+    prompt: "Create a full-stack frontend and backend scaffold with API routes, database schema and Docker compose.",
+    expect: ["full-stack", "frontend", "backend", "api", "routes", "database", "docker", "express"],
+    reject: ["profile card", "portfolio", "gallery", "newsletter", "game"],
+    minExpectedHits: 3,
+    optionalUntilCorpusTerms: ["full-stack", "scaffold", "project structure", "folder structure", "docker-compose", "backend and frontend"]
   }
 ];
 
@@ -121,6 +153,37 @@ function matchedTerms(text, terms) {
   return terms.filter((term) => termMatches(text, term));
 }
 
+function corpusRegex(terms = []) {
+  const body = terms
+    .map((term) => String(term).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"))
+    .filter(Boolean)
+    .join("|");
+  return body ? `(^|[^a-z0-9])(${body})([^a-z0-9]|$)` : "";
+}
+
+async function corpusHasAnyTerm(terms = []) {
+  const pattern = corpusRegex(terms);
+  if (!pattern) return true;
+  const row = await query(
+    `SELECT COUNT(*)::int AS count
+     FROM ml_skills k
+     LEFT JOIN ml_sources s ON s.id = k.source_id
+     WHERE k.enabled=TRUE
+       AND (s.id IS NULL OR s.enabled=TRUE)
+       AND (k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* $1`,
+    [pattern]
+  );
+  return Number(row.rows[0]?.count || 0) > 0;
+}
+
+async function corpusMatchedTerms(terms = []) {
+  const matches = [];
+  for (const term of terms) {
+    if (await corpusHasAnyTerm([term])) matches.push(term);
+  }
+  return matches;
+}
+
 function compactSkills(skills = []) {
   return skills.map((skill) => ({
     id: skill.id,
@@ -140,6 +203,27 @@ function sleep(ms) {
 
 async function runCase(testCase) {
   const start = Date.now();
+  if (testCase.optionalUntilCorpusTerms?.length) {
+    const corpusMatches = await corpusMatchedTerms(testCase.optionalUntilCorpusTerms);
+    const minCorpusTerms = Number(testCase.optionalCorpusMinTerms || 2);
+    if (corpusMatches.length < minCorpusTerms) {
+      return {
+        id: testCase.id,
+        prompt: testCase.prompt,
+        ok: true,
+        skipped: true,
+        durationMs: Date.now() - start,
+        expected: corpusMatches,
+        rejected: [],
+        failures: [],
+        selectorReason: `Skipped until at least ${minCorpusTerms} matching learned terms exist for: ${testCase.optionalUntilCorpusTerms.join(", ")}`,
+        warning: "",
+        selectorStrategy: "not_run",
+        cacheHit: false,
+        skills: []
+      };
+    }
+  }
   const result = await debugMindQuery(testCase.prompt);
   const skills = Array.isArray(result.skills) ? result.skills : [];
   const text = selectedText(skills);
@@ -295,7 +379,7 @@ function printHuman(results, status) {
   console.log("");
 
   for (const result of results) {
-    const mark = result.ok ? "PASS" : "FAIL";
+    const mark = result.skipped ? "SKIP" : result.ok ? "PASS" : "FAIL";
     const names = result.skills.map((skill) => skill.name).join("; ") || "no skills";
     console.log(`${mark} ${result.id} (${formatDuration(result.durationMs)})`);
     console.log(`  Prompt: ${result.prompt}`);

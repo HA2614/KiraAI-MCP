@@ -21,7 +21,6 @@ RUN apt-get update \
 COPY package.json package-lock.json ./
 COPY backend/package.json backend/package.json
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/backend/node_modules ./backend/node_modules
 COPY backend ./backend
 COPY desktop ./desktop
 COPY --from=build /app/frontend/dist ./frontend/dist

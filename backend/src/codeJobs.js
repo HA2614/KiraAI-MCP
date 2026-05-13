@@ -321,6 +321,34 @@ async function resolveCodeJobRoot({ projectId, rootPath }) {
   return { projectId: null, safeRoot: resolveSafePath(rootPath) };
 }
 
+function buildFullStackStructurePrompt({ projectName = "Selected project", instructions = "" } = {}) {
+  const extra = String(instructions || "").trim();
+  return [
+    `Create a reviewable full-stack project structure for "${projectName}".`,
+    "",
+    "First inspect the existing workspace. If files or folders already exist, preserve them and only add missing structure.",
+    "",
+    "Create or update a coherent baseline with:",
+    "- frontend/ using React and Vite with src/main.jsx, src/App.jsx, and a small CSS entry.",
+    "- backend/ using Node.js and Express.",
+    "- backend/src/routes/ with at least a health route and one example REST resource route.",
+    "- backend/src/config.js for environment-driven configuration.",
+    "- backend/src/db.js for database access setup.",
+    "- backend/sql/schema.sql with practical SQL tables for the example resource.",
+    "- .env.example with non-secret placeholders.",
+    "- docker-compose.yml that can run the app and database locally.",
+    "- README.md with concise install, run, and structure notes.",
+    "",
+    "Rules:",
+    "- Keep this as a proposal in the isolated workspace; the app will show diffs for review.",
+    "- Do not create secrets or real credentials.",
+    "- Do not edit unrelated existing files unless needed to connect the structure.",
+    "- Make API, routes, and database names consistent.",
+    "- Prefer simple, readable JavaScript and SQL over heavy frameworks.",
+    extra ? `\nAdditional user instructions:\n${extra}` : ""
+  ].filter(Boolean).join("\n");
+}
+
 function isNoisyCodexLogLine(lower) {
   return [
     "postgresql://",
@@ -885,18 +913,44 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
   }
 }
 
-export async function startCodeJob({ projectId, rootPath, userPrompt }) {
+export async function startCodeJob({ projectId, rootPath, userPrompt, jobType = "prompt", title = "", requestMetadata = {} }) {
   const resolved = await resolveCodeJobRoot({ projectId, rootPath });
   if (!userPrompt?.trim()) throw new ValidationError("Prompt is required");
   const created = await query(
-    `INSERT INTO code_jobs (project_id, root_path, user_prompt, model, status)
-     VALUES ($1,$2,$3,$4,'queued')
+    `INSERT INTO code_jobs (project_id, root_path, user_prompt, model, status, job_type, title, request_metadata)
+     VALUES ($1,$2,$3,$4,'queued',$5,$6,$7::jsonb)
      RETURNING *`,
-    [resolved.projectId, resolved.safeRoot, userPrompt, config.codeAiModel]
+    [
+      resolved.projectId,
+      resolved.safeRoot,
+      userPrompt,
+      config.codeAiModel,
+      jobType || "prompt",
+      title || null,
+      JSON.stringify(requestMetadata || {})
+    ]
   );
   const job = created.rows[0];
   void runCodeJob(job.id).catch((error) => failCodeJob(job.id, error));
   return job;
+}
+
+export async function startStructureCodeJob({ projectId, preset = "full_stack", instructions = "" }) {
+  if (preset !== "full_stack") throw new ValidationError("Unsupported structure preset");
+  const project = await query("SELECT id, name, root_path FROM projects WHERE id=$1 LIMIT 1", [projectId]);
+  if (!project.rowCount) throw new NotFoundError("Project not found");
+  const row = project.rows[0];
+  const prompt = buildFullStackStructurePrompt({ projectName: row.name, instructions });
+  return startCodeJob({
+    projectId: row.id,
+    userPrompt: prompt,
+    jobType: "structure",
+    title: "Full-stack structure proposal",
+    requestMetadata: {
+      preset,
+      instructions: String(instructions || "").trim()
+    }
+  });
 }
 
 async function failCodeJob(jobId, error) {
@@ -1057,16 +1111,44 @@ export async function getCodeJob(jobId) {
   return row.rows[0];
 }
 
-export async function listCodeJobs(limit = 20, offset = 0) {
+export async function listCodeJobs(limit = 20, offset = 0, filters = {}) {
+  const clauses = [];
+  const params = [];
+  if (filters.projectId) {
+    params.push(filters.projectId);
+    clauses.push(`c.project_id=$${params.length}`);
+  }
+  if (filters.status) {
+    params.push(filters.status);
+    clauses.push(`c.status=$${params.length}`);
+  }
+  if (filters.type) {
+    params.push(filters.type);
+    clauses.push(`c.job_type=$${params.length}`);
+  }
+  params.push(limit);
+  const limitIndex = params.length;
+  params.push(offset);
+  const offsetIndex = params.length;
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = await query(
     `SELECT c.*, p.name AS project_name, p.root_path AS project_root_path
      FROM code_jobs c
      LEFT JOIN projects p ON p.id = c.project_id
+     ${where}
      ORDER BY c.created_at DESC
-     LIMIT $1 OFFSET $2`,
-    [limit, offset]
+     LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
+    params
   );
   return rows.rows;
+}
+
+export async function listProjectCodeJobs(projectId, options = {}) {
+  return listCodeJobs(options.limit || 30, options.offset || 0, {
+    projectId,
+    status: options.status || "",
+    type: options.type || ""
+  });
 }
 
 export async function applyCodeJob(jobId) {

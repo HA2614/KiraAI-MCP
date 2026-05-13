@@ -29,6 +29,8 @@ http://localhost:4000
 
 The app is bound to localhost by default. The Docker setup mounts `./workspace` from this repo into the app container at `/workspace`.
 
+If `4000`, `5432`, or `6379` are already in use on the host, change `APP_HOST_PORT`, `POSTGRES_HOST_PORT`, or `REDIS_HOST_PORT` in `.env`.
+
 ## Codex CLI
 
 You do not need VS Code or a Codex extension on the target machine. Docker installs the Codex CLI inside the app image from the npm dependencies.
@@ -79,10 +81,13 @@ Common settings:
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 CODE_AI_MODEL=gpt-5.5
+CODE_JOB_TIMEOUT_MS=900000
 ML_MIND_ENABLED=true
 ML_AI_PROVIDER=codex_cli
 ML_EMBEDDING_PROVIDER=local_hash
 ```
+
+With the default Docker settings, Code Worker, Analyzer, and ML skill extraction use Codex CLI authentication. `OPENAI_API_KEY` is only required if you switch planning or embeddings to OpenAI.
 
 Do not commit `.env`.
 

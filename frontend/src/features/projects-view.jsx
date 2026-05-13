@@ -13,6 +13,7 @@ export function ProjectsView({
   openProject,
   updateProjectRoot,
   importExistingProject,
+  createWorkspaceProject,
   defaultTargetPath,
   performanceProjectId,
   performanceRuns,
@@ -21,6 +22,9 @@ export function ProjectsView({
 }) {
   const [query, setQuery] = useState("");
   const [importPath, setImportPath] = useState(defaultTargetPath || "/host/c/Users/Hayan/Downloads");
+  const [projectName, setProjectName] = useState("");
+  const [projectGoals, setProjectGoals] = useState("");
+  const [projectBasePath, setProjectBasePath] = useState(defaultTargetPath || "/workspace");
   const filtered = useMemo(() => {
     const needle = query.toLowerCase();
     return projects.filter((p) => `${p.name} ${p.root_path || ""}`.toLowerCase().includes(needle));
@@ -28,7 +32,8 @@ export function ProjectsView({
 
   useEffect(() => {
     if (!importPath && defaultTargetPath) setImportPath(defaultTargetPath);
-  }, [defaultTargetPath, importPath]);
+    if (!projectBasePath && defaultTargetPath) setProjectBasePath(defaultTargetPath);
+  }, [defaultTargetPath, importPath, projectBasePath]);
 
   async function submitImport(event) {
     event.preventDefault();
@@ -36,25 +41,62 @@ export function ProjectsView({
     await importExistingProject(importPath.trim());
   }
 
+  async function submitCreate(event) {
+    event.preventDefault();
+    const name = projectName.trim();
+    if (!name) return;
+    const created = await createWorkspaceProject({
+      name,
+      goals: projectGoals.trim(),
+      basePath: projectBasePath.trim()
+    });
+    if (created) {
+      setProjectName("");
+      setProjectGoals("");
+    }
+  }
+
   return (
     <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
-      <Card>
-        <CardHeader>
-          <CardTitle>Import Existing Codebase</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form className="grid gap-3" onSubmit={submitImport}>
-            <div className="flex flex-wrap gap-2">
-              <Input className="min-w-0 flex-1" placeholder="/host/c/Users/Hayan/Downloads/my-project" value={importPath} onChange={(e) => setImportPath(e.target.value)} />
-              <PathPickerDialog value={importPath} onSelect={setImportPath} />
-            </div>
-            <Button type="submit" disabled={busy || !importPath.trim()}>{busy ? "Importing..." : "Import Folder as Project"}</Button>
-            <p className="text-xs text-muted-foreground">
-              Imported projects start with pending metadata. KiraAI Analyzer will process the folder and update the project after the run.
-            </p>
-          </form>
-        </CardContent>
-      </Card>
+      <div className="grid gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>Create Project Folder</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <form className="grid gap-3" onSubmit={submitCreate}>
+              <Input placeholder="Project name" value={projectName} onChange={(e) => setProjectName(e.target.value)} />
+              <Input placeholder="Optional goal or first task" value={projectGoals} onChange={(e) => setProjectGoals(e.target.value)} />
+              <div className="flex flex-wrap gap-2">
+                <Input className="min-w-0 flex-1" placeholder="/workspace" value={projectBasePath} onChange={(e) => setProjectBasePath(e.target.value)} />
+                <PathPickerDialog value={projectBasePath} onSelect={setProjectBasePath} />
+              </div>
+              <Button type="submit" disabled={busy || !projectName.trim()}>{busy ? "Creating..." : "Create Project"}</Button>
+              <p className="text-xs text-muted-foreground">
+                KiraAI creates a safe folder from the project name, then links it as this project's workspace root.
+              </p>
+            </form>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Import Existing Codebase</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <form className="grid gap-3" onSubmit={submitImport}>
+              <div className="flex flex-wrap gap-2">
+                <Input className="min-w-0 flex-1" placeholder="/host/c/Users/Hayan/Downloads/my-project" value={importPath} onChange={(e) => setImportPath(e.target.value)} />
+                <PathPickerDialog value={importPath} onSelect={setImportPath} />
+              </div>
+              <Button type="submit" disabled={busy || !importPath.trim()}>{busy ? "Importing..." : "Import Folder as Project"}</Button>
+              <p className="text-xs text-muted-foreground">
+                Imported projects start with pending metadata. KiraAI Analyzer will process the folder and update the project after the run.
+              </p>
+            </form>
+          </CardContent>
+        </Card>
+      </div>
 
       <Card>
         <CardHeader>

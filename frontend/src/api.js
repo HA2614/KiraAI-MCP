@@ -44,6 +44,10 @@ export async function importProject(targetPath) {
   return apiPost("/projects/import", { targetPath });
 }
 
+export async function createProjectFolder(payload) {
+  return apiPost("/projects/create-folder", payload);
+}
+
 export async function fsList(targetPath) {
   return apiPost("/fs/list", { targetPath });
 }
@@ -99,6 +103,19 @@ export async function getCodeJob(id) {
 
 export async function listCodeJobs(limit = 20, offset = 0) {
   return apiGet(`/code-jobs?limit=${limit}&offset=${offset}`);
+}
+
+export async function listProjectCodeJobs(projectId, options = {}) {
+  const params = new URLSearchParams();
+  params.set("limit", String(options.limit || 30));
+  params.set("offset", String(options.offset || 0));
+  if (options.status) params.set("status", options.status);
+  if (options.type) params.set("type", options.type);
+  return apiGet(`/projects/${projectId}/code-jobs?${params.toString()}`);
+}
+
+export async function createCodeStructureJob(projectId, payload = {}) {
+  return apiPost(`/projects/${projectId}/code-structure-jobs`, payload);
 }
 
 export async function getProjectPerformanceRuns(projectId, options = {}) {

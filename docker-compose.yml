@@ -18,13 +18,13 @@ services:
       FS_BASE_PATH: ${CONTAINER_FS_ROOT:-/workspace}
       FS_TREE_MAX_DIRS: ${FS_TREE_MAX_DIRS:-80}
       STATIC_FRONTEND_DIR: /app/frontend/dist
-      AI_PROVIDER: ${CONTAINER_AI_PROVIDER:-openai}
+      AI_PROVIDER: ${CONTAINER_AI_PROVIDER:-codex_cli}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       CODE_AI_MODEL: ${CODE_AI_MODEL:-gpt-5.5}
       CODE_JOB_SANDBOX: ${CODE_JOB_SANDBOX:-danger-full-access}
       CODE_JOB_REASONING_EFFORT: ${CODE_JOB_REASONING_EFFORT:-low}
-      CODE_JOB_TIMEOUT_MS: ${CODE_JOB_TIMEOUT_MS:-450000}
+      CODE_JOB_TIMEOUT_MS: ${CODE_JOB_TIMEOUT_MS:-900000}
       JOB_RESUME_ENABLED: ${JOB_RESUME_ENABLED:-true}
       CODE_JOB_MAX_RESUME_ATTEMPTS: ${CODE_JOB_MAX_RESUME_ATTEMPTS:-2}
       ML_JOB_MAX_RESUME_ATTEMPTS: ${ML_JOB_MAX_RESUME_ATTEMPTS:-2}
@@ -32,7 +32,7 @@ services:
       CODEX_MODEL: ${CODEX_MODEL:-}
       CODEX_SUMMARY_MODEL: ${CODEX_SUMMARY_MODEL:-gpt-5.3-codex}
       CODEX_SUMMARY_SANDBOX: ${CODEX_SUMMARY_SANDBOX:-danger-full-access}
-      CODEX_TIMEOUT_MS: ${CODEX_TIMEOUT_MS:-450000}
+      CODEX_TIMEOUT_MS: ${CODEX_TIMEOUT_MS:-900000}
       CODEX_BIN: ${CONTAINER_CODEX_BIN:-/app/node_modules/.bin/codex}
       CODEX_HOME: /root/.codex
       ML_MIND_ENABLED: ${ML_MIND_ENABLED:-true}
@@ -46,7 +46,7 @@ services:
       ML_CHUNK_OVERLAP: ${ML_CHUNK_OVERLAP:-250}
       ML_RETRIEVAL_LIMIT: ${ML_RETRIEVAL_LIMIT:-8}
     ports:
-      - "127.0.0.1:4000:4000"
+      - "${APP_BIND_HOST:-127.0.0.1}:${APP_HOST_PORT:-4000}:4000"
     volumes:
       - type: bind
         source: ${HOST_WORKSPACE_ROOT:-./workspace}
@@ -63,7 +63,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: mcp_pm
     ports:
-      - "5432:5432"
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -76,7 +76,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "${REDIS_BIND_HOST:-127.0.0.1}:${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redisdata:/data
     healthcheck:

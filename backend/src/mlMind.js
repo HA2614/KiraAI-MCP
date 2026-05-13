@@ -13,7 +13,7 @@ const openai = config.openAiApiKey ? new OpenAI({ apiKey: config.openAiApiKey })
 const eventClients = new Map();
 const activeJobs = new Map();
 const RUNNER_ID = `ml-${process.pid}-${randomUUID()}`;
-const MIND_SELECTOR_VERSION = "fast-v11";
+const MIND_SELECTOR_VERSION = "fast-v15";
 
 const TEXT_EXTENSIONS = new Set([
   ".astro",
@@ -1784,6 +1784,12 @@ function promptIntent(promptText) {
   const text = String(promptText || "").toLowerCase();
   const wantsLogin = /\b(login|log in|signin|sign in|auth|authentication|password|account access|inloggen|aanmelden|wachtwoord)\b/.test(text);
   const wantsSaasProduct = /\b(saas|dashboard|admin|backoffice|webapp|web app|product ui|app ui|filebrowser|file browser|file manager|files app|file app|file list|folders?|storage|drive|workspace|document manager)\b/.test(text);
+  const wantsBackend = /\b(backend|back-end|server-side|server side|server\.js|express|node server|api server|middleware|controller|controllers|service layer|services|request handler|response handler)\b/.test(text);
+  const wantsApiRoutes = /\b(rest|endpoint|endpoints|api route|api routes|route|routes|router|controller|controllers|crud|http method|get route|post route|put route|delete route)\b/.test(text) ||
+    (/\bapi\b/.test(text) && /\b(backend|server|route|routes|endpoint|endpoints|rest|crud|express|database|sql|controller)\b/.test(text));
+  const wantsDatabase = /\b(sql|database|databases|db|postgres|postgresql|mysql|sqlite|schema\.sql|schema|migration|migrations|table|tables|column|columns|primary key|foreign key|seed|seeding|query builder)\b/.test(text);
+  const wantsFullStackScaffold = /\b(full stack|full-stack|scaffold|scaffolding|project structure|folder structure|backend structure|frontend structure|frontend\/backend|frontend and backend|backend and frontend|vite.*express|express.*vite|docker compose|docker-compose)\b/.test(text);
+  const wantsBackendWorkflow = wantsBackend || wantsApiRoutes || wantsDatabase || wantsFullStackScaffold;
   const wantsProfileCard = (
     /\b(profile|user)\b/.test(text) &&
     /\b(card|component|ui)\b/.test(text)
@@ -1812,6 +1818,11 @@ function promptIntent(promptText) {
     wantsMobileNav,
     wantsGalleryOverlay,
     wantsNewsletter,
+    wantsBackend,
+    wantsApiRoutes,
+    wantsDatabase,
+    wantsFullStackScaffold,
+    wantsBackendWorkflow,
     wantsDataModel: /\b(type|types|typescript|interface|class|schema|model|data model|state model|store|database)\b/.test(text),
     wantsTheme: /\b(theme|theming|dark mode|light mode|color system|css variable|custom propert|design token|palette|thema|donker|licht)\b/.test(text),
     wantsState: /\b(state|filter|toggle|tabs|search|sort|fetch|api|dynamic|interactive|interaction)\b/.test(text),
@@ -1835,6 +1846,7 @@ function skillTitleText(skill) {
 function isFormImplementationSkill(skill) {
   const title = skillTitleText(skill);
   const text = skillText(skill);
+  if (/\b(playwright|e2e|workflow assertions|integration testing)\b/.test(text)) return false;
   if (/\b(contact|newsletter|booking|search)\b/.test(title)) return false;
   if (/\b(modal|dialog|popup)\b/.test(title)) return false;
   if (/\b(modal|dialog|popup)\b/.test(text) && !/\b(input|label|required|email|password|submit|focus)\b/.test(text)) return false;
@@ -1910,9 +1922,65 @@ function isNewsletterImplementationSkill(skill) {
   return /\b(newsletter|subscribe|signup|email input|email form|submit button|inline newsletter|form)\b/.test(text);
 }
 
+function isBackendNoiseSkill(skill) {
+  const text = skillText(skill);
+  return /\b(profile card|pricing card|product card|contact form|newsletter|portfolio|project grid|gallery|image hover|media hover|grayscale|avatar|social link|mobile nav|hamburger|theme toggle|hero section|animation|game|canvas|calculator|blog|article|playwright|e2e|frontend e2e|front-end routes|frontend routes|front end|front-end|frontend data|client-side|client side|api[- ]client|api loader|api loaders|react query|data hook|front end assets|deployed client|protocol message|message frame|frame dispatch|navigation|tab state|feature card|modal form|react hook form|toast|cache invalidation|onboarding form|metadata form|sortable table|table header|browser blob|xhr transport|prototype methods|syntax token|highlight token|fixed-card grids|field type)\b/.test(text);
+}
+
+function isApiRouteImplementationSkill(skill) {
+  const text = skillText(skill);
+  if (isBackendNoiseSkill(skill)) return false;
+  const hasRouteShape = /\b(api|rest|endpoint|endpoints|route|routes|router|resource route|url shape|crud)\b/.test(text);
+  const hasBackendAnchor = /\b(express|backend|server|middleware|controller|controllers|request|response|request object|handler|handlers|status code|status codes|http method|route-specific|api route|resource route|req|res)\b/.test(text);
+  return hasRouteShape && hasBackendAnchor;
+}
+
+function isBackendImplementationSkill(skill) {
+  const text = skillText(skill);
+  if (isBackendNoiseSkill(skill)) return false;
+  return /\b(backend|back-end|server|server-side|express|node server|middleware|controller|service layer|request handler|response handler|api server|environment config|config\.js|cors|error handler|authorization middleware|route middleware)\b/.test(text);
+}
+
+function isDatabaseImplementationSkill(skill) {
+  const text = skillText(skill);
+  if (isBackendNoiseSkill(skill)) return false;
+  return /\b(sql|database|db connection|postgres|postgresql|mysql|sqlite|schema\.sql|migration|migrations|primary key|foreign key|query builder|transaction|connection pool|pool)\b/.test(text);
+}
+
+function isFullStackStructureSkill(skill) {
+  const text = skillText(skill);
+  if (isBackendNoiseSkill(skill)) return false;
+  return /\b(full stack|full-stack|scaffold|scaffolding|project structure|folder structure)\b/.test(text) ||
+    (/\b(frontend|front-end|react|vite)\b/.test(text) && /\b(backend|back-end|express|server|api|database|sql)\b/.test(text)) ||
+    (/\b(docker-compose|docker compose|\.env\.example|readme)\b/.test(text) && /\b(backend|api|database|frontend)\b/.test(text));
+}
+
 function isSkillCompatibleWithPrompt(promptText, skill) {
   const intent = promptIntent(promptText);
   const text = skillText(skill);
+
+  if (intent.wantsFullStackScaffold) {
+    return isFullStackStructureSkill(skill) ||
+      isBackendImplementationSkill(skill) ||
+      isApiRouteImplementationSkill(skill) ||
+      isDatabaseImplementationSkill(skill);
+  }
+
+  if (intent.wantsDatabase && !intent.wantsCardUi && !intent.wantsProfileCard && !intent.wantsLogin) {
+    return isDatabaseImplementationSkill(skill);
+  }
+
+  if (intent.wantsApiRoutes && !intent.wantsCardUi && !intent.wantsProfileCard && !intent.wantsLogin) {
+    return isApiRouteImplementationSkill(skill) || isBackendImplementationSkill(skill);
+  }
+
+  if (intent.wantsBackend && !intent.wantsCardUi && !intent.wantsProfileCard && !intent.wantsLogin) {
+    return isBackendImplementationSkill(skill) || isApiRouteImplementationSkill(skill) || isDatabaseImplementationSkill(skill);
+  }
+
+  if (!intent.wantsBackendWorkflow && !intent.wantsState) {
+    if (isBackendImplementationSkill(skill) || isApiRouteImplementationSkill(skill) || isDatabaseImplementationSkill(skill)) return false;
+  }
 
   const isDataModelSkill = /\b(type|typescript|interface|class|schema|modeling|data model|profile data)\b/.test(text);
   if (isDataModelSkill && !intent.wantsDataModel) return false;
@@ -1994,6 +2062,15 @@ function scoreSkillForPrompt(promptText, skill) {
     if (text.includes(word)) score += 0.04;
   }
 
+  if (intent.wantsBackendWorkflow && isBackendNoiseSkill(skill)) score -= 0.65;
+  if (intent.wantsFullStackScaffold && isFullStackStructureSkill(skill)) score += 0.75;
+  if (intent.wantsFullStackScaffold && (isBackendImplementationSkill(skill) || isApiRouteImplementationSkill(skill) || isDatabaseImplementationSkill(skill))) score += 0.35;
+  if (intent.wantsBackend && isBackendImplementationSkill(skill)) score += 0.65;
+  if (intent.wantsApiRoutes && isApiRouteImplementationSkill(skill)) score += 0.7;
+  if (intent.wantsDatabase && isDatabaseImplementationSkill(skill)) score += 0.75;
+  if (intent.wantsBackendWorkflow && /\b(api|route|endpoint|express|backend|database|sql|migration|schema|docker|env|frontend)\b/.test(text)) score += 0.12;
+  if (!intent.wantsBackendWorkflow && !intent.wantsState && (isBackendImplementationSkill(skill) || isApiRouteImplementationSkill(skill) || isDatabaseImplementationSkill(skill))) score -= 0.55;
+
   if (intent.wantsCardUi && /\b(card|cards)\b/.test(text)) score += 0.18;
   if (intent.wantsCardUi && /\b(grid|flex|layout|responsive|component|avatar|image|media|profile)\b/.test(text)) score += 0.08;
   if (intent.wantsProfileCard && /\b(profile|avatar|social|user|portrait)\b/.test(text)) score += 0.28;
@@ -2053,6 +2130,10 @@ function ensureIntentCoverage(promptText, selectedSkills, rankedSkills) {
   if (intent.wantsMobileNav) addBest(isMobileNavImplementationSkill, { prepend: true });
   if (intent.wantsGalleryOverlay) addBest(isGalleryOverlayImplementationSkill, { prepend: true });
   if (intent.wantsNewsletter) addBest(isNewsletterImplementationSkill, { prepend: true });
+  if (intent.wantsFullStackScaffold) addBest(isFullStackStructureSkill, { prepend: true });
+  if (intent.wantsBackend) addBest(isBackendImplementationSkill, { prepend: true });
+  if (intent.wantsApiRoutes) addBest(isApiRouteImplementationSkill, { prepend: true });
+  if (intent.wantsDatabase) addBest(isDatabaseImplementationSkill, { prepend: true });
 
   if (intent.wantsLogin && !selected.some(isFormImplementationSkill)) {
     const formSkill = rankedSkills.find((skill) => isFormImplementationSkill(skill) && isSkillCompatibleWithPrompt(promptText, skill));
@@ -2140,6 +2221,27 @@ async function loadIntentSkillRows(promptText, existingIds = []) {
   if (intent.wantsNewsletter) {
     conditions.push("(k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(newsletter|subscribe|signup|email input|email form|submit button|inline newsletter)'");
     ordering.push("WHEN (k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(newsletter|subscribe|email input|submit button)' THEN 0");
+  }
+
+  if (intent.wantsFullStackScaffold) {
+    conditions.push("(k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(full stack|full-stack|scaffold|project structure|folder structure|frontend.*backend|backend.*frontend|vite.*express|express.*vite|docker-compose|docker compose|env\\.example|backend.*database|api.*database)'");
+    ordering.push("WHEN (k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(full stack|full-stack|scaffold|project structure|frontend.*backend|backend.*frontend|docker-compose|docker compose)' THEN 0");
+    ordering.push("WHEN (k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(backend|express|api|routes|database|sql)' THEN 1");
+  }
+
+  if (intent.wantsBackend) {
+    conditions.push("(k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(backend|back-end|server-side|express|node server|middleware|controller|service layer|request handler|response handler|api server|config\\.js|cors|error handler|authorization middleware|route middleware)'");
+    ordering.push("WHEN (k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(backend|express|server|middleware|controller|service layer)' THEN 0");
+  }
+
+  if (intent.wantsApiRoutes) {
+    conditions.push("(k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(api route|rest|endpoint|endpoints|resource route|route-specific|router|controller|middleware|request object|request handler|response handler|http method|crud|status code|express)'");
+    ordering.push("WHEN (k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(api|rest|endpoint|route|router|controller|crud)' THEN 0");
+  }
+
+  if (intent.wantsDatabase) {
+    conditions.push("(k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(\\msql\\M|database|db connection|postgres|postgresql|mysql|sqlite|schema\\.sql|migration|migrations|primary key|foreign key|query builder|transaction|connection pool)'");
+    ordering.push("WHEN (k.name || ' ' || k.category || ' ' || k.summary || ' ' || k.guidance) ~* '(sql|database|postgres|schema\\.sql|migration|table|foreign key)' THEN 0");
   }
 
   if (!conditions.length) return [];
