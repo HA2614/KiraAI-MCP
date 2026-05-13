@@ -74,6 +74,7 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
 # Local runtime data
+README.local.md
 workspace/*
 !workspace/.gitkeep
 pgdata/
