@@ -9,7 +9,9 @@ FROM deps AS build
 WORKDIR /app
 COPY . .
 ARG VITE_DEFAULT_ROOT=/workspace
+ARG VITE_API_URL=/api
 ENV VITE_DEFAULT_ROOT=$VITE_DEFAULT_ROOT
+ENV VITE_API_URL=$VITE_API_URL
 RUN npm --workspace frontend run build
 
 FROM node:22-bookworm-slim AS runtime

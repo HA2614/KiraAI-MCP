@@ -4,6 +4,7 @@ services:
       context: .
       args:
         VITE_DEFAULT_ROOT: ${VITE_DEFAULT_ROOT:-/workspace}
+        VITE_API_URL: ${VITE_API_URL:-/api}
     restart: unless-stopped
     depends_on:
       postgres:

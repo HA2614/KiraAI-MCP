@@ -1,7 +1,10 @@
 import axios from "axios";
 
+const API_BASE_URL = (import.meta.env.VITE_API_URL || "/api").replace(/\/+$/, "") || "/api";
+const API_ORIGIN = API_BASE_URL.replace(/\/api\/?$/, "");
+
 const client = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://localhost:4000/api",
+  baseURL: API_BASE_URL,
   timeout: Number(import.meta.env.VITE_API_TIMEOUT_MS || 15000)
 });
 
@@ -89,8 +92,7 @@ export async function fsCopy(sourcePath, destinationPath, conflictPolicy = "fail
 }
 
 export function openFsEvents(root) {
-  const base = (import.meta.env.VITE_API_URL || "http://localhost:4000/api").replace(/\/api\/?$/, "");
-  return new EventSource(`${base}/api/fs/events?root=${encodeURIComponent(root)}`);
+  return new EventSource(`${API_ORIGIN}/api/fs/events?root=${encodeURIComponent(root)}`);
 }
 
 export async function createCodeJob(projectId, userPrompt, options = {}) {
@@ -102,8 +104,7 @@ export async function getCodeJob(id) {
 }
 
 export function codeJobAssetUrl(jobId, assetId) {
-  const base = (import.meta.env.VITE_API_URL || "http://localhost:4000/api").replace(/\/$/, "");
-  return `${base}/code-jobs/${jobId}/assets/${assetId}`;
+  return `${API_BASE_URL}/code-jobs/${jobId}/assets/${assetId}`;
 }
 
 export async function listCodeJobs(limit = 20, offset = 0, options = {}) {
@@ -155,11 +156,9 @@ export async function healthCheck(timeout = 3000) {
 }
 
 export function openCodeJobEvents(id) {
-  const base = (import.meta.env.VITE_API_URL || "http://localhost:4000/api").replace(/\/api\/?$/, "");
-  return new EventSource(`${base}/api/code-jobs/${id}/events`);
+  return new EventSource(`${API_ORIGIN}/api/code-jobs/${id}/events`);
 }
 
 export function openMlJobEvents(id) {
-  const base = (import.meta.env.VITE_API_URL || "http://localhost:4000/api").replace(/\/api\/?$/, "");
-  return new EventSource(`${base}/api/ml/jobs/${id}/events`);
+  return new EventSource(`${API_ORIGIN}/api/ml/jobs/${id}/events`);
 }
