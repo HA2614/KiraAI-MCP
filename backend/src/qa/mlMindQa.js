@@ -1,6 +1,6 @@
 import { pool, query } from "../db.js";
 import { createServer } from "node:http";
-import { debugMindQuery, getLearningJob, getMlStatus, createWebsitesBatch } from "../mlMind.js";
+import { createSourcesBatch, createWebsitesBatch, debugMindQuery, getLearningJob, getMlStatus } from "../mlMind.js";
 
 const QA_CASES = [
   {
@@ -109,7 +109,8 @@ const QA_CASES = [
     expect: ["sql", "schema", "migration", "table", "primary key", "foreign key", "database"],
     reject: ["profile card", "portfolio", "pricing", "gallery", "newsletter", "game"],
     minExpectedHits: 3,
-    optionalUntilCorpusTerms: ["sql", "migration", "schema.sql", "foreign key", "postgres"]
+    optionalUntilCorpusTerms: ["sql", "migration", "schema.sql", "foreign key", "postgres"],
+    optionalCorpusMinTerms: 3
   },
   {
     id: "full-stack-scaffold",
@@ -372,6 +373,41 @@ async function runWebsiteScraperQa() {
   };
 }
 
+async function runGithubSourceQueueQa() {
+  const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const sourceUrl = `https://github.com/kiraai-qa/nonblocking-source-${suffix}`;
+  const start = Date.now();
+  let sourceId = null;
+  const failures = [];
+
+  try {
+    const batch = await createSourcesBatch([sourceUrl], { autoLearn: false });
+    const durationMs = Date.now() - start;
+    const source = batch.created[0];
+    sourceId = source?.id;
+    if (batch.totals.created !== 1) failures.push(`Expected 1 queued GitHub source, got ${batch.totals.created}`);
+    if (!sourceId) failures.push("GitHub source was not stored");
+    if (durationMs > 2000) failures.push(`GitHub source intake blocked too long: ${durationMs}ms`);
+  } finally {
+    if (sourceId) {
+      await query("DELETE FROM ml_sources WHERE id=$1", [sourceId]).catch(() => null);
+    }
+  }
+
+  return {
+    id: "github-source-queue",
+    prompt: sourceUrl,
+    ok: failures.length === 0,
+    durationMs: Date.now() - start,
+    expected: failures.length ? [] : ["queued", "non-blocking"],
+    rejected: [],
+    failures,
+    selectorReason: "",
+    warning: "",
+    skills: []
+  };
+}
+
 function printHuman(results, status) {
   console.log("KiraAI QA");
   console.log(`Provider: ${status.aiProvider} | Embeddings: ${status.embeddingProvider} | Skill model: ${status.skillModel}`);
@@ -417,6 +453,9 @@ async function main() {
   }
   if (!only && !hasArg("--skip-scraper")) {
     results.push(await runWebsiteScraperQa());
+  }
+  if (!only) {
+    results.push(await runGithubSourceQueueQa());
   }
 
   if (hasArg("--json")) {

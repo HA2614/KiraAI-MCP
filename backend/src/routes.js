@@ -29,6 +29,7 @@ import { registerFsEventStream } from "./fsEvents.js";
 import {
   applyCodeJob,
   getCodeJob,
+  getCodeJobAsset,
   listCodeJobs,
   listProjectCodeJobs,
   registerCodeJobEvents,
@@ -153,7 +154,8 @@ const rootQuerySchema = z.object({
 const codeJobSchema = z.object({
   projectId: z.number().int().positive().optional(),
   rootPath: z.string().optional().default(""),
-  userPrompt: z.string().min(1)
+  userPrompt: z.string().min(1),
+  responseMode: z.enum(["auto", "code", "image"]).optional().default("auto")
 }).refine((data) => data.projectId || data.rootPath.trim(), {
   message: "projectId or rootPath is required",
   path: ["projectId"]
@@ -161,7 +163,7 @@ const codeJobSchema = z.object({
 const codeJobHistoryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional().default(30),
   offset: z.coerce.number().int().min(0).optional().default(0),
-  status: z.enum(["", "queued", "planning", "running", "awaiting_review", "applied", "rejected", "failed"]).optional().default(""),
+  status: z.enum(["", "queued", "planning", "running", "awaiting_review", "done", "applied", "rejected", "failed"]).optional().default(""),
   type: z.enum(["", "prompt", "structure"]).optional().default("")
 });
 const codeStructureJobSchema = z.object({
@@ -1125,9 +1127,22 @@ router.post("/code-jobs", async (req, res) =>
 
 router.get("/code-jobs", async (req, res) =>
   routeGuard(res, async () => {
-    const limit = Number(req.query.limit || 20);
-    const offset = Number(req.query.offset || 0);
-    return ok(res, await listCodeJobs(limit, offset), { limit, offset });
+    const parsed = codeJobHistoryQuerySchema.safeParse(req.query);
+    if (!parsed.success) throw new ValidationError("Invalid code job history query", parsed.error.flatten());
+    const { limit, offset, status, type } = parsed.data;
+    return ok(res, await listCodeJobs(limit, offset, { status, type }), { limit, offset, status, type });
+  })
+);
+
+router.get("/code-jobs/:id/assets/:assetId", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const assetId = parseIntParam(req.params.assetId, "assetId");
+    const asset = await getCodeJobAsset(id, assetId);
+    const filename = String(asset.filename || "kiraai-asset").replace(/["\r\n]/g, "");
+    res.setHeader("Content-Type", asset.mime_type || "application/octet-stream");
+    res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+    res.send(asset.content);
   })
 );
 

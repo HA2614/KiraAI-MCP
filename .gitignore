@@ -75,6 +75,7 @@ vite.config.ts.timestamp-*
 
 # Local runtime data
 README.local.md
+mcp features.docx
 workspace/*
 !workspace/.gitkeep
 pgdata/

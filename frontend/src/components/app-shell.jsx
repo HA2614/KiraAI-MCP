@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 const NAV_TABS = [
   ["projects", "Projects", FolderOpen],
   ["plans", "Plans", FileText],
-  ["structure", "Structure", GitBranch],
+  ["structure", "Advanced Structure", GitBranch],
   ["explorer", "Explorer", Files],
   ["analyzer", "KiraAI Analyzer", BarChart2],
   ["code", "KiraAI Code", Code2],

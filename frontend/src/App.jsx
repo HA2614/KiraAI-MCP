@@ -35,14 +35,24 @@ import { StructureView } from "@/features/structure-view";
 import { ExplorerView } from "@/features/explorer-view";
 import { AnalyzerView } from "@/features/analyzer-view";
 import { CodeWorkerView } from "@/features/code-worker-view";
+import {
+  CODE_JOB_RESTORABLE_STATUSES,
+  CODE_JOB_RUNNING_STATUSES,
+  applyJobToCodeSession,
+  codeJobProjectId,
+  emptyCodeSession,
+  needsCodeJobAssetSync,
+  isNewerJob,
+  normalizeCodeSession,
+  projectKey,
+  readSavedCodeWorkerSessions,
+  useCodeJobStreams,
+  writeCodeWorkerSessions
+} from "@/features/code-worker-session";
 import { SettingsView } from "@/features/settings-view";
 
 const DEFAULT_ROOT = import.meta.env.VITE_DEFAULT_ROOT || "/workspace";
 const SETTINGS_STORAGE_KEY = "mcpserver.settings.v1";
-const CODE_WORKER_LEGACY_STORAGE_KEY = "mcpserver.codeWorker.v1";
-const CODE_WORKER_SESSIONS_STORAGE_KEY = "mcpserver.codeWorker.sessions.v1";
-const CODE_JOB_RUNNING_STATUSES = new Set(["queued", "planning", "running"]);
-const CODE_JOB_RESTORABLE_STATUSES = new Set(["queued", "planning", "running", "awaiting_review"]);
 const CODE_JOB_ACTIVE_STATUSES = new Set(["queued", "planning", "running", "awaiting_review"]);
 
 function initialConnectionStatus() {
@@ -77,139 +87,6 @@ function initialSettings() {
     overwriteStrategy: saved.overwriteStrategy || "skip_existing",
     structurePrompt: saved.structurePrompt || ""
   };
-}
-
-function readJsonStorage(key, fallback = null) {
-  if (typeof window === "undefined") return null;
-  try {
-    return JSON.parse(window.localStorage.getItem(key) || JSON.stringify(fallback));
-  } catch {
-    return fallback;
-  }
-}
-
-function projectKey(projectId) {
-  if (projectId === null || projectId === undefined || projectId === "") return null;
-  return String(projectId);
-}
-
-function emptyCodeSession() {
-  return {
-    prompt: "",
-    job: null,
-    logs: [],
-    busy: false,
-    restored: false,
-    terminalStatus: "idle",
-    lastLogAt: null
-  };
-}
-
-function logFingerprint(log) {
-  if (!log) return "";
-  return `${log.ts || ""}|${log.message || ""}|${JSON.stringify(log.data || {})}`;
-}
-
-function mergeCodeLogs(...logLists) {
-  const seen = new Set();
-  const merged = [];
-  for (const list of logLists) {
-    if (!Array.isArray(list)) continue;
-    for (const log of list) {
-      const key = logFingerprint(log);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      merged.push(log);
-    }
-  }
-  return merged.slice(-300);
-}
-
-function latestLogTimestamp(logs) {
-  const list = Array.isArray(logs) ? logs : [];
-  for (let index = list.length - 1; index >= 0; index -= 1) {
-    if (list[index]?.ts) return list[index].ts;
-  }
-  return null;
-}
-
-function normalizeCodeSession(session = {}) {
-  return {
-    ...emptyCodeSession(),
-    ...session,
-    prompt: session.prompt || session.job?.user_prompt || "",
-    logs: Array.isArray(session.logs) ? session.logs : [],
-    busy: Boolean(session.busy),
-    restored: Boolean(session.restored)
-  };
-}
-
-function applyJobToCodeSession(session, job, options = {}) {
-  const current = normalizeCodeSession(session);
-  const logs = mergeCodeLogs(current.logs, job?.logs);
-  const running = CODE_JOB_RUNNING_STATUSES.has(job?.status);
-  const restorable = CODE_JOB_RESTORABLE_STATUSES.has(job?.status);
-  return {
-    ...current,
-    job: job || current.job,
-    prompt: job?.user_prompt || current.prompt || "",
-    logs,
-    busy: running,
-    restored: options.restored ? restorable : current.restored && restorable,
-    terminalStatus: running ? (current.terminalStatus === "live" ? "live" : "polling") : restorable ? "review" : "idle",
-    lastLogAt: latestLogTimestamp(logs) || current.lastLogAt
-  };
-}
-
-function isNewerJob(candidate, existing) {
-  if (!existing) return true;
-  const candidateDate = new Date(candidate.updated_at || candidate.created_at || 0).getTime();
-  const existingDate = new Date(existing.updated_at || existing.created_at || 0).getTime();
-  if (candidateDate !== existingDate) return candidateDate > existingDate;
-  return Number(candidate.id || 0) > Number(existing.id || 0);
-}
-
-function readSavedCodeWorkerSessions() {
-  const saved = readJsonStorage(CODE_WORKER_SESSIONS_STORAGE_KEY, null);
-  if (saved?.sessions && typeof saved.sessions === "object") return saved;
-
-  const legacy = readJsonStorage(CODE_WORKER_LEGACY_STORAGE_KEY, null);
-  const key = projectKey(legacy?.projectId);
-  if (!key) return { selectedProjectId: null, sessions: {} };
-  return {
-    selectedProjectId: legacy.projectId,
-    sessions: {
-      [key]: {
-        projectId: legacy.projectId,
-        jobId: legacy.jobId || null,
-        prompt: legacy.prompt || "",
-        status: legacy.status || null,
-        updatedAt: legacy.updatedAt || null
-      }
-    }
-  };
-}
-
-function writeCodeWorkerSessions(selectedProjectId, sessions) {
-  if (typeof window === "undefined") return;
-  const serialized = { selectedProjectId: selectedProjectId || null, sessions: {} };
-  for (const [key, rawSession] of Object.entries(sessions || {})) {
-    const session = normalizeCodeSession(rawSession);
-    if (!session.prompt.trim() && !session.job?.id) continue;
-    serialized.sessions[key] = {
-      projectId: Number.isNaN(Number(key)) ? key : Number(key),
-      jobId: session.job?.id || null,
-      prompt: session.job?.user_prompt || session.prompt || "",
-      status: session.job?.status || null,
-      updatedAt: new Date().toISOString()
-    };
-  }
-  window.localStorage.setItem(CODE_WORKER_SESSIONS_STORAGE_KEY, JSON.stringify(serialized));
-  window.localStorage.removeItem(CODE_WORKER_LEGACY_STORAGE_KEY);
-}
-
-function codeJobProjectId(job) {
-  return job?.project_id ?? job?.projectId ?? null;
 }
 
 function pathName(value) {
@@ -294,6 +171,7 @@ export default function App() {
     [codeSessions, codeProjectId]
   );
   const codePrompt = selectedCodeSession.prompt;
+  const codeMode = selectedCodeSession.responseMode || "auto";
   const codeJob = selectedCodeSession.job;
   const codeBusy = selectedCodeSession.busy;
   const codeLogs = selectedCodeSession.logs;
@@ -304,6 +182,13 @@ export default function App() {
     return Object.entries(codeSessions)
       .filter(([, session]) => session?.job?.id && CODE_JOB_RUNNING_STATUSES.has(session.job.status))
       .map(([key, session]) => `${key}:${session.job.id}:${session.job.status}`)
+      .sort()
+      .join("|");
+  }, [codeSessions]);
+  const imageAssetSyncSignature = useMemo(() => {
+    return Object.entries(codeSessions)
+      .filter(([, session]) => needsCodeJobAssetSync(session?.job))
+      .map(([key, session]) => `${key}:${session.job.id}:${session.job.updated_at || ""}`)
       .sort()
       .join("|");
   }, [codeSessions]);
@@ -355,63 +240,23 @@ export default function App() {
     };
   }, [tab, explorerLoaded, currentPath]);
 
+  useCodeJobStreams({
+    codeSessions,
+    runningCodeJobSignature,
+    updateCodeSession,
+    fetchCodeJobSnapshot,
+    openCodeJobEvents
+  });
+
   useEffect(() => {
-    if (!runningCodeJobSignature) return;
-    const cleanups = [];
-    const runningSessions = Object.entries(codeSessions)
-      .filter(([, session]) => session?.job?.id && CODE_JOB_RUNNING_STATUSES.has(session.job.status));
-
-    for (const [key, session] of runningSessions) {
-      const jobId = session.job.id;
-      let stream = openCodeJobEvents(jobId);
-      let streamClosed = false;
-
-      const syncSnapshot = () => {
-        fetchCodeJobSnapshot(key, jobId).catch(() => null);
-      };
-
-      updateCodeSession(key, { terminalStatus: "connecting" });
-      syncSnapshot();
-
-      const poll = setInterval(syncSnapshot, 1500);
-
-      stream.onopen = () => {
-        updateCodeSession(key, { terminalStatus: "live" });
-        syncSnapshot();
-      };
-
-      stream.addEventListener("code-job", (event) => {
-        const payload = JSON.parse(event.data || "{}");
-        const eventProjectId = projectKey(codeJobProjectId(payload.job) || key);
-        if (!eventProjectId) return;
-        updateCodeSession(eventProjectId, (current) => {
-          const logs = mergeCodeLogs(current.logs, payload.job?.logs, payload.entry ? [payload.entry] : []);
-          const withLogs = {
-            ...current,
-            logs,
-            terminalStatus: "live",
-            lastLogAt: latestLogTimestamp(logs) || current.lastLogAt
-          };
-          return payload.job ? applyJobToCodeSession(withLogs, payload.job) : withLogs;
-        });
-      });
-
-      stream.onerror = () => {
-        if (streamClosed) return;
-        updateCodeSession(key, { terminalStatus: "polling" });
-        stream.close();
-        streamClosed = true;
-      };
-
-      cleanups.push(() => {
-        clearInterval(poll);
-        streamClosed = true;
-        stream.close();
-      });
+    if (!imageAssetSyncSignature) return;
+    const pending = Object.entries(codeSessions)
+      .filter(([, session]) => needsCodeJobAssetSync(session?.job))
+      .map(([key, session]) => ({ key, jobId: session.job.id }));
+    for (const item of pending) {
+      fetchCodeJobSnapshot(item.key, item.jobId).catch(() => null);
     }
-
-    return () => cleanups.forEach((cleanup) => cleanup());
-  }, [runningCodeJobSignature]);
+  }, [imageAssetSyncSignature]);
 
   useEffect(() => {
     if (!codeSessionsHydrated) return;
@@ -583,18 +428,22 @@ export default function App() {
   }
 
   async function loadCodeHistory(projectId = codeProjectId, options = {}) {
-    if (!projectId) {
+    const scope = options.scope || "project";
+    if (scope !== "all" && !projectId) {
       setCodeHistory([]);
       return [];
     }
     setCodeHistoryBusy(true);
     try {
-      const rows = await listProjectCodeJobs(projectId, {
+      const queryOptions = {
         limit: options.limit || 40,
         offset: options.offset || 0,
         status: options.status || "",
         type: options.type || ""
-      });
+      };
+      const rows = scope === "all"
+        ? await listCodeJobs(queryOptions.limit, queryOptions.offset, queryOptions)
+        : await listProjectCodeJobs(projectId, queryOptions);
       setCodeHistory(rows);
       return rows;
     } finally {
@@ -616,6 +465,13 @@ export default function App() {
     updateCodeSession(codeProjectId, (session) => ({
       ...session,
       prompt: typeof nextPrompt === "function" ? nextPrompt(session.prompt) : nextPrompt
+    }));
+  }
+
+  function setCurrentCodeMode(nextMode) {
+    updateCodeSession(codeProjectId, (session) => ({
+      ...session,
+      responseMode: ["auto", "code", "image"].includes(nextMode) ? nextMode : "auto"
     }));
   }
 
@@ -994,11 +850,12 @@ export default function App() {
       busy: true,
       logs: [],
       restored: false,
+      responseMode: codeMode,
       terminalStatus: "connecting",
       lastLogAt: null
     });
     try {
-      const job = await createCodeJob(Number(selectedCodeProject.id), prompt);
+      const job = await createCodeJob(Number(selectedCodeProject.id), prompt, { responseMode: codeMode });
       mergeJobIntoCodeSession(selectedCodeProject.id, job);
       await loadCodeHistory(selectedCodeProject.id).catch(() => null);
       const latest = await getCodeJob(job.id);
@@ -1064,14 +921,20 @@ export default function App() {
     const key = projectKey(codeProjectId);
     if (!key) return;
     setCodeSessions((prev) => {
-      const next = { ...prev };
-      delete next[key];
-      return next;
+      const currentMode = normalizeCodeSession(prev[key]).responseMode;
+      return {
+        ...prev,
+        [key]: {
+          ...emptyCodeSession(),
+          responseMode: currentMode
+        }
+      };
     });
   }
 
   const titleMap = {
     plans: "Plan Workspace",
+    structure: "Advanced Structure",
     analyzer: "KiraAI Analyzer",
     code: "KiraAI Code",
     settings: "KiraAI Settings"
@@ -1097,7 +960,7 @@ export default function App() {
       {tab === "structure" ? <StructureView settings={settings} setSettings={setSettings} runStructure={runStructure} selectedProjectId={selectedProjectId} structureResult={structureResult} /> : null}
       {tab === "explorer" ? <ExplorerView parentPath={parentPath} loadExplorer={loadExplorer} navigateExplorer={navigateExplorer} goBack={goExplorerBack} goForward={goExplorerForward} canGoBack={explorerBackStack.length > 0} canGoForward={explorerForwardStack.length > 0} currentPath={currentPath} entries={entries} tree={tree} openEntry={openEntry} selectedPaths={selectedPaths} toggleSelect={toggleSelect} openFilePath={openFilePath} setOpenFilePath={setOpenFilePath} openFileContent={openFileContent} setOpenFileContent={setOpenFileContent} dirtyFile={dirtyFile} setDirtyFile={setDirtyFile} saveFile={saveFile} fsConnected={fsConnected} createFolder={createFolder} createFile={createFile} renameSelected={renameSelected} deleteSelected={deleteSelected} copySelected={copySelected} moveSelected={moveSelected} filter={filter} setFilter={setFilter} /> : null}
       {tab === "analyzer" ? <AnalyzerView projects={projects} selectedProjectId={analysisProjectId} setSelectedProjectId={setAnalysisProjectId} runCodebaseSummary={runCodebaseSummary} analysisBusy={analysisBusy} analysisJob={analysisJob} analysisResult={analysisResult} projectSummaries={projectSummaries} loadProjectSummaries={loadProjectSummaries} setAnalysisResult={(data) => setAnalysisResult(normalizeSummaryResult(data))} setError={setError} getSummaryById={getSummaryById} /> : null}
-      {tab === "code" ? <CodeWorkerView projects={projects} sessionsByProject={codeSessions} selectedProject={selectedCodeProject} selectedProjectId={codeProjectId} setSelectedProjectId={setCodeProjectId} codePrompt={codePrompt} setCodePrompt={setCurrentCodePrompt} codeJob={codeJob} codeBusy={codeBusy} codeLogs={codeLogs} terminalStatus={codeTerminalStatus} lastLogAt={codeLastLogAt} learningProfile={codeLearningProfile} codeSessionRestored={codeSessionRestored} codeHistory={codeHistory} codeHistoryBusy={codeHistoryBusy} loadCodeHistory={loadCodeHistory} openCodeHistoryJob={openCodeHistoryJob} startCodeWorker={startCodeWorker} startCodeStructureWorker={startCodeStructureWorker} applyCurrentCodeJob={applyCurrentCodeJob} rejectCurrentCodeJob={rejectCurrentCodeJob} resetCodeWorker={resetCodeWorker} /> : null}
+      {tab === "code" ? <CodeWorkerView projects={projects} sessionsByProject={codeSessions} selectedProject={selectedCodeProject} selectedProjectId={codeProjectId} setSelectedProjectId={setCodeProjectId} codePrompt={codePrompt} setCodePrompt={setCurrentCodePrompt} codeMode={codeMode} setCodeMode={setCurrentCodeMode} codeJob={codeJob} codeBusy={codeBusy} codeLogs={codeLogs} terminalStatus={codeTerminalStatus} lastLogAt={codeLastLogAt} learningProfile={codeLearningProfile} codeSessionRestored={codeSessionRestored} codeHistory={codeHistory} codeHistoryBusy={codeHistoryBusy} loadCodeHistory={loadCodeHistory} openCodeHistoryJob={openCodeHistoryJob} startCodeWorker={startCodeWorker} startCodeStructureWorker={startCodeStructureWorker} applyCurrentCodeJob={applyCurrentCodeJob} rejectCurrentCodeJob={rejectCurrentCodeJob} resetCodeWorker={resetCodeWorker} /> : null}
       {tab === "settings" ? <SettingsView settings={settings} setSettings={setSettings} savedDefaultPath={savedDefaultPath} saveDefaultSettings={saveDefaultSettings} /> : null}
     </AppShell>
   );

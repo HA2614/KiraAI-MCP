@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "migrate": "node src/migrate.js",
-    "check": "node --check src/performanceTiming.js && node --check src/codexBinary.js && node --check src/mlMind.js && node --check src/routes.js && node --check src/codeJobs.js && node --check src/ai.js && node --check src/codexCodebaseSummary.js && node --check src/config.js && node --check src/qa/mlMindQa.js",
+    "check": "node --check src/performanceTiming.js && node --check src/codexBinary.js && node --check src/imageGeneration.js && node --check src/mlMind.js && node --check src/routes.js && node --check src/codeJobs.js && node --check src/ai.js && node --check src/codexCodebaseSummary.js && node --check src/config.js && node --check src/qa/mlMindQa.js && node --check src/qa/codeResponseQa.js",
     "qa:ml": "node src/qa/mlMindQa.js",
-    "qa": "npm run migrate && npm run check && npm run qa:ml",
+    "qa:code-response": "node src/qa/codeResponseQa.js",
+    "qa": "npm run migrate && npm run check && npm run qa:ml && npm run qa:code-response",
     "start": "node src/server.js",
     "mcp": "node src/mcpServer.js",
     "terminal": "node src/terminalApp.js",

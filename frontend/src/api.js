@@ -93,16 +93,26 @@ export function openFsEvents(root) {
   return new EventSource(`${base}/api/fs/events?root=${encodeURIComponent(root)}`);
 }
 
-export async function createCodeJob(projectId, userPrompt) {
-  return apiPost("/code-jobs", { projectId, userPrompt });
+export async function createCodeJob(projectId, userPrompt, options = {}) {
+  return apiPost("/code-jobs", { projectId, userPrompt, responseMode: options.responseMode || "auto" });
 }
 
 export async function getCodeJob(id) {
   return apiGet(`/code-jobs/${id}`);
 }
 
-export async function listCodeJobs(limit = 20, offset = 0) {
-  return apiGet(`/code-jobs?limit=${limit}&offset=${offset}`);
+export function codeJobAssetUrl(jobId, assetId) {
+  const base = (import.meta.env.VITE_API_URL || "http://localhost:4000/api").replace(/\/$/, "");
+  return `${base}/code-jobs/${jobId}/assets/${assetId}`;
+}
+
+export async function listCodeJobs(limit = 20, offset = 0, options = {}) {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  if (options.status) params.set("status", options.status);
+  if (options.type) params.set("type", options.type);
+  return apiGet(`/code-jobs?${params.toString()}`);
 }
 
 export async function listProjectCodeJobs(projectId, options = {}) {

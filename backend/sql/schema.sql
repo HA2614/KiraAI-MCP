@@ -129,6 +129,9 @@ CREATE TABLE IF NOT EXISTS code_jobs (
   diff_summary TEXT,
   risk_notes JSONB NOT NULL DEFAULT '[]'::jsonb,
   test_commands JSONB NOT NULL DEFAULT '[]'::jsonb,
+  response_markdown TEXT,
+  response_kind TEXT NOT NULL DEFAULT 'code',
+  response_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   final_status TEXT,
   started_at TIMESTAMP,
   finished_at TIMESTAMP,
@@ -159,6 +162,20 @@ ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;
 ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP;
 ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
 ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS stage_timings JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS response_markdown TEXT;
+ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS response_kind TEXT NOT NULL DEFAULT 'code';
+ALTER TABLE code_jobs ADD COLUMN IF NOT EXISTS response_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+CREATE TABLE IF NOT EXISTS code_job_assets (
+  id SERIAL PRIMARY KEY,
+  code_job_id INTEGER NOT NULL REFERENCES code_jobs(id) ON DELETE CASCADE,
+  asset_type TEXT NOT NULL DEFAULT 'image',
+  mime_type TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  content BYTEA NOT NULL,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS ml_sources (
   id SERIAL PRIMARY KEY,
@@ -301,6 +318,7 @@ CREATE INDEX IF NOT EXISTS idx_ml_sources_type_hash ON ml_sources(source_type, i
 CREATE INDEX IF NOT EXISTS idx_code_jobs_status_resume ON code_jobs(status, resume_count, updated_at);
 CREATE INDEX IF NOT EXISTS idx_code_jobs_project_duration ON code_jobs(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_code_jobs_project_type_created ON code_jobs(project_id, job_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_code_job_assets_job ON code_job_assets(code_job_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_codebase_summaries_project_duration ON codebase_summaries(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ml_learning_jobs_source_created ON ml_learning_jobs(source_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ml_learning_jobs_status_resume ON ml_learning_jobs(status, resume_count, updated_at);

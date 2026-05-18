@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Bot, CheckCircle2, Clock3, GitPullRequest, History, Layers3, Play, Search, ShieldAlert, TerminalSquare, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, Clock3, ExternalLink, GitPullRequest, History, ImageIcon, Layers3, Play, Search, ShieldAlert, TerminalSquare, XCircle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,10 +8,11 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
+import { codeJobAssetUrl } from "@/api";
 
 const REVIEW_STATUSES = new Set(["awaiting_review"]);
 const ACTIVE_STATUSES = new Set(["queued", "planning", "running", "awaiting_review"]);
-const FINAL_STATUSES = new Set(["applied", "rejected", "failed"]);
+const FINAL_STATUSES = new Set(["done", "applied", "rejected", "failed"]);
 
 export function CodeWorkerView({
   projects,
@@ -21,6 +22,8 @@ export function CodeWorkerView({
   setSelectedProjectId,
   codePrompt,
   setCodePrompt,
+  codeMode = "auto",
+  setCodeMode,
   codeJob,
   codeBusy,
   codeLogs,
@@ -41,17 +44,28 @@ export function CodeWorkerView({
   const [query, setQuery] = useState("");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [nowMs, setNowMs] = useState(Date.now());
+  const [historyScope, setHistoryScope] = useState("project");
   const [historyType, setHistoryType] = useState("");
   const [structureInstructions, setStructureInstructions] = useState("");
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const files = Array.isArray(codeJob?.changed_files) ? codeJob.changed_files : [];
   const risks = Array.isArray(codeJob?.risk_notes) ? codeJob.risk_notes : [];
   const tests = Array.isArray(codeJob?.test_commands) ? codeJob.test_commands : [];
+  const assets = Array.isArray(codeJob?.assets) ? codeJob.assets : [];
   const logs = mergeDisplayLogs(codeLogs, codeJob?.logs);
   const selectedFile = files[selectedFileIndex] || files[0] || null;
   const readyForReview = REVIEW_STATUSES.has(codeJob?.status);
   const finished = FINAL_STATUSES.has(codeJob?.status);
+  const failed = codeJob?.status === "failed";
+  const imageOnlyJob = codeJob?.response_kind === "image";
+  const responseMarkdown = codeJob?.response_markdown || (
+    imageOnlyJob
+      ? buildImagePendingResponse(codeJob?.user_prompt || codePrompt)
+      : "The response appears when the proposal is ready."
+  );
   const hasActiveJob = ACTIVE_STATUSES.has(codeJob?.status);
   const canStart = Boolean(selectedProject?.root_path && codePrompt.trim() && !codeBusy && !hasActiveJob && !codeJob);
+  const canRetry = Boolean(failed && selectedProject?.root_path && codePrompt.trim() && !codeBusy);
   const hasStyleProfile = learningProfile?.styleProfile && Object.keys(learningProfile.styleProfile).length > 0;
   const styleStatus = hasStyleProfile ? "Style profile loaded" : "No style profile yet";
   const resumeCount = Number(codeJob?.resume_count || 0);
@@ -78,7 +92,12 @@ export function CodeWorkerView({
   }, [codeJob?.id]);
 
   useEffect(() => {
+    setTerminalOpen(false);
+  }, [codeJob?.id]);
+
+  useEffect(() => {
     setHistoryType("");
+    setHistoryScope("project");
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -87,10 +106,12 @@ export function CodeWorkerView({
     return () => clearInterval(timer);
   }, [hasActiveJob, codeJob?.started_at]);
 
-  async function refreshHistory(nextType = historyType) {
-    if (!selectedProjectId || !loadCodeHistory) return;
+  async function refreshHistory(nextType = historyType, nextScope = historyScope) {
+    if (!loadCodeHistory) return;
+    if (nextScope !== "all" && !selectedProjectId) return;
     setHistoryType(nextType);
-    await loadCodeHistory(selectedProjectId, { type: nextType });
+    setHistoryScope(nextScope);
+    await loadCodeHistory(selectedProjectId, { type: nextType, scope: nextScope });
   }
 
   async function startStructure() {
@@ -149,9 +170,19 @@ export function CodeWorkerView({
                 <History className="h-4 w-4" />
                 Prompt History
               </CardTitle>
-              <Button size="sm" variant="outline" onClick={() => refreshHistory()} disabled={!selectedProjectId || codeHistoryBusy}>
+              <Button size="sm" variant="outline" onClick={() => refreshHistory()} disabled={(historyScope !== "all" && !selectedProjectId) || codeHistoryBusy}>
                 Refresh
               </Button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[
+                ["project", "This project"],
+                ["all", "All projects"]
+              ].map(([value, label]) => (
+                <Button key={value} size="sm" variant={historyScope === value ? "default" : "outline"} onClick={() => refreshHistory(historyType, value)} disabled={(value !== "all" && !selectedProjectId) || codeHistoryBusy}>
+                  {label}
+                </Button>
+              ))}
             </div>
             <div className="flex flex-wrap gap-2">
               {[
@@ -159,7 +190,7 @@ export function CodeWorkerView({
                 ["prompt", "Prompts"],
                 ["structure", "Structure"]
               ].map(([value, label]) => (
-                <Button key={value || "all"} size="sm" variant={historyType === value ? "default" : "outline"} onClick={() => refreshHistory(value)} disabled={!selectedProjectId || codeHistoryBusy}>
+                <Button key={value || "all"} size="sm" variant={historyType === value ? "default" : "outline"} onClick={() => refreshHistory(value)} disabled={(historyScope !== "all" && !selectedProjectId) || codeHistoryBusy}>
                   {label}
                 </Button>
               ))}
@@ -183,21 +214,26 @@ export function CodeWorkerView({
                     </div>
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
                       <Badge variant="outline">{job.status || "queued"}</Badge>
+                      {historyScope === "all" && job.project_name ? <Badge variant="outline">{job.project_name}</Badge> : null}
                       {job.duration_ms ? <Badge variant="outline">{formatDurationMs(job.duration_ms)}</Badge> : null}
+                      {Number(job.asset_count || 0) > 0 || job.response_kind === "image" ? <Badge variant="secondary"><ImageIcon className="mr-1 h-3 w-3" /> image</Badge> : null}
                       <DiffStats additions={sumChanged(job.changed_files, "additions")} deletions={sumChanged(job.changed_files, "deletions")} />
                     </div>
                     <div className="mt-2 line-clamp-2 text-xs text-muted-foreground">{job.diff_summary || formatDate(job.created_at)}</div>
                   </button>
                 ))}
                 {codeHistoryBusy ? <p className="rounded-lg border p-3 text-sm text-muted-foreground">Loading history...</p> : null}
-                {!codeHistoryBusy && !codeHistory.length ? <p className="rounded-lg border p-3 text-sm text-muted-foreground">No KiraAI Code history for this project yet.</p> : null}
+                {!codeHistoryBusy && !codeHistory.length ? <p className="rounded-lg border p-3 text-sm text-muted-foreground">{historyScope === "all" ? "No KiraAI Code history yet." : "No KiraAI Code history for this project yet."}</p> : null}
               </div>
             </ScrollArea>
           </CardContent>
         </Card>
       </div>
 
-      <div className="grid min-h-[720px] grid-rows-[minmax(0,1fr)_260px] gap-3 xl:h-[calc(100vh-6.5rem)]">
+      <div className={cn(
+        "grid min-h-[720px] gap-3 xl:h-[calc(100vh-6.5rem)]",
+        terminalOpen ? "grid-rows-[minmax(0,1fr)_260px]" : "grid-rows-[minmax(0,1fr)]"
+      )}>
         <Card className="min-h-0 overflow-hidden">
           <CardHeader className="border-b bg-secondary/20">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -207,7 +243,13 @@ export function CodeWorkerView({
                   Kira Code
                 </CardTitle>
               </div>
-              <StatusBadge status={codeJob?.status} busy={codeBusy} resumeCount={resumeCount} />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant={terminalOpen ? "secondary" : "outline"} onClick={() => setTerminalOpen((open) => !open)}>
+                  <TerminalSquare className="mr-2 h-4 w-4" />
+                  {terminalOpen ? "Hide terminal" : "Show terminal"}
+                </Button>
+                <StatusBadge status={codeJob?.status} busy={codeBusy} resumeCount={resumeCount} />
+              </div>
             </div>
           </CardHeader>
           <CardContent className="grid min-h-0 gap-4 p-4">
@@ -270,7 +312,10 @@ export function CodeWorkerView({
 
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_240px]">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Prompt</label>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="text-sm font-medium">Prompt</label>
+                  <ModeSelector value={codeMode} onChange={setCodeMode} disabled={hasActiveJob && !finished} />
+                </div>
                 <Textarea
                   className="min-h-[190px] resize-none font-mono text-sm"
                   value={codePrompt}
@@ -282,16 +327,21 @@ export function CodeWorkerView({
               <div className="space-y-2">
                 <p className="text-sm font-medium">Run state</p>
                 <div className="rounded-lg border p-3">
-                  <StatusStep label="Planning" active={["planning", "running", "awaiting_review", "applied", "rejected"].includes(codeJob?.status)} current={codeJob?.status === "planning"} />
-                  <StatusStep label="Generating proposal" active={["running", "awaiting_review", "applied", "rejected"].includes(codeJob?.status)} current={codeJob?.status === "running"} />
-                  <StatusStep label="Awaiting review" active={["awaiting_review", "applied", "rejected"].includes(codeJob?.status)} current={codeJob?.status === "awaiting_review"} />
+                  <StatusStep label="Planning" active={["planning", "running", "awaiting_review", "done", "applied", "rejected"].includes(codeJob?.status)} current={codeJob?.status === "planning"} />
+                  <StatusStep label={imageOnlyJob ? "Generating image" : "Generating proposal"} active={["running", "awaiting_review", "done", "applied", "rejected"].includes(codeJob?.status)} current={codeJob?.status === "running"} />
+                  <StatusStep label={imageOnlyJob ? "Response ready" : "Awaiting review"} active={["awaiting_review", "done", "applied", "rejected"].includes(codeJob?.status)} current={codeJob?.status === "awaiting_review"} />
                   <StatusStep label="Finished" active={finished} current={finished} />
                 </div>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              {!finished ? (
+              {failed ? (
+                <Button onClick={startCodeWorker} disabled={!canRetry}>
+                  <Play className="mr-2 h-4 w-4" />
+                  Retry
+                </Button>
+              ) : !finished ? (
                 <Button onClick={startCodeWorker} disabled={!canStart}>
                   <Play className="mr-2 h-4 w-4" />
                   {codeBusy ? "Running..." : "Start KiraAI Job"}
@@ -309,15 +359,25 @@ export function CodeWorkerView({
                   </Button>
                 </>
               ) : null}
-              {finished ? <Button variant="outline" onClick={resetCodeWorker}>Start another prompt</Button> : null}
+              {finished && !failed ? <Button variant="outline" onClick={resetCodeWorker}>Start another prompt</Button> : null}
               {readyForReview ? <span className="text-sm text-muted-foreground">KiraAI is asking for your decision.</span> : null}
             </div>
 
             {codeJob?.status === "failed" ? (
               <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
                 <div className="font-semibold">Code job failed</div>
-                <div>{latestError(logs) || "Open the web terminal for details."}</div>
+                <div>{latestError(logs) || "Click Show terminal for details."}</div>
               </div>
+            ) : null}
+
+            {codeJob ? (
+              <Panel title="KiraAI Response">
+                <div className="rounded-lg border bg-background p-3">
+                  {imageOnlyJob ? <AssetGallery job={codeJob} assets={assets} /> : null}
+                  <ResponseMarkdown text={responseMarkdown} />
+                  {!imageOnlyJob ? <AssetGallery job={codeJob} assets={assets} /> : null}
+                </div>
+              </Panel>
             ) : null}
 
             {codeJob ? (
@@ -354,25 +414,30 @@ export function CodeWorkerView({
           </CardContent>
         </Card>
 
-        <Card className="overflow-hidden border-slate-900 bg-slate-950 text-slate-100">
-          <CardHeader className="border-b border-slate-800 py-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <TerminalSquare className="h-4 w-4" />
-                Web terminal
-              </CardTitle>
-              <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
-                <span>{terminalStatusLabel(terminalStatus)}</span>
-                <span>{lastLogAt ? `last log ${new Date(lastLogAt).toLocaleTimeString()}` : "no logs yet"}</span>
+        {terminalOpen ? (
+          <Card className="overflow-hidden border-slate-900 bg-slate-950 text-slate-100">
+            <CardHeader className="border-b border-slate-800 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <TerminalSquare className="h-4 w-4" />
+                  Web terminal
+                </CardTitle>
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                  <span>{terminalStatusLabel(terminalStatus)}</span>
+                  <span>{lastLogAt ? `last log ${new Date(lastLogAt).toLocaleTimeString()}` : "no logs yet"}</span>
+                  <Button size="sm" variant="ghost" className="h-7 px-2 text-slate-200 hover:bg-slate-800 hover:text-white" onClick={() => setTerminalOpen(false)}>
+                    Hide
+                  </Button>
+                </div>
               </div>
-            </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            <ScrollArea className="h-[198px] p-3 font-mono text-xs">
-              <pre className="whitespace-pre-wrap">{formatLogs(logs)}</pre>
-            </ScrollArea>
-          </CardContent>
-        </Card>
+            </CardHeader>
+            <CardContent className="p-0">
+              <ScrollArea className="h-[198px] p-3 font-mono text-xs">
+                <pre className="whitespace-pre-wrap">{formatLogs(logs)}</pre>
+              </ScrollArea>
+            </CardContent>
+          </Card>
+        ) : null}
       </div>
 
       <Card className="min-h-[620px] overflow-hidden xl:h-[calc(100vh-6.5rem)]">
@@ -423,6 +488,7 @@ export function CodeWorkerView({
 
 function StatusBadge({ status, busy, resumeCount = 0 }) {
   if (!status && !busy) return <Badge variant="outline">Idle</Badge>;
+  if (status === "done") return <Badge variant="default">Done</Badge>;
   const label = `${busy ? status || "running" : status}${resumeCount > 0 ? ` - resumed x${resumeCount}` : ""}`;
   return <Badge variant={status === "awaiting_review" ? "default" : "secondary"}>{label}</Badge>;
 }
@@ -445,6 +511,31 @@ function Panel({ title, children }) {
   );
 }
 
+function ModeSelector({ value = "auto", onChange, disabled = false }) {
+  const modes = [
+    ["auto", "Auto"],
+    ["code", "Code"],
+    ["image", "Image"]
+  ];
+  return (
+    <div className="inline-flex rounded-md border bg-background p-0.5">
+      {modes.map(([mode, label]) => (
+        <Button
+          key={mode}
+          type="button"
+          size="sm"
+          variant={value === mode ? "default" : "ghost"}
+          className="h-7 rounded px-2 text-xs"
+          disabled={disabled}
+          onClick={() => onChange?.(mode)}
+        >
+          {label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
 function ListOrEmpty({ icon, items, empty }) {
   if (!items.length) return <p className="text-sm text-muted-foreground">{empty}</p>;
   return (
@@ -455,6 +546,77 @@ function ListOrEmpty({ icon, items, empty }) {
           <span>{item}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function buildImagePendingResponse(prompt = "") {
+  const preview = String(prompt || "").replace(/\s+/g, " ").trim().slice(0, 220);
+  return [
+    "## Ik ga dit maken",
+    preview
+      ? `Oké, ik ga nu een afbeelding maken van: ${preview}`
+      : "Oké, ik ga nu een afbeelding maken op basis van je prompt.",
+    "Dit duurt meestal ongeveer 1 tot 2 minuten.",
+    "",
+    "## Status",
+    "Codex is bezig met genereren. Zodra de afbeelding klaar is, verschijnt de preview hieronder in de response box.",
+    "De afbeelding wordt als KiraAI job asset bewaard, niet als bestand in je projectfolder."
+  ].join("\n");
+}
+
+function ResponseMarkdown({ text }) {
+  const lines = String(text || "").split(/\r?\n/);
+  return (
+    <div className="space-y-1 text-sm">
+      {lines.map((line, index) => {
+        if (!line.trim()) return <div key={index} className="h-2" />;
+        if (line.startsWith("## ")) {
+          return <h4 key={index} className="pt-1 text-sm font-semibold">{line.replace(/^##\s+/, "")}</h4>;
+        }
+        if (line.startsWith("- ")) {
+          return <p key={index} className="pl-4 text-muted-foreground before:-ml-4 before:pr-2 before:content-['-']">{renderInlineCode(line.slice(2))}</p>;
+        }
+        return <p key={index} className="text-muted-foreground">{renderInlineCode(line)}</p>;
+      })}
+    </div>
+  );
+}
+
+function renderInlineCode(text) {
+  const parts = String(text || "").split(/(`[^`]+`)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={index} className="rounded bg-secondary px-1 py-0.5 font-mono text-xs text-foreground">{part.slice(1, -1)}</code>;
+    }
+    return <React.Fragment key={index}>{part}</React.Fragment>;
+  });
+}
+
+function AssetGallery({ job, assets = [] }) {
+  const imageAssets = assets.filter((asset) => String(asset.asset_type || "").toLowerCase() === "image");
+  if (!imageAssets.length) return null;
+  return (
+    <div className="mb-4 space-y-3">
+      <div className="grid gap-3 sm:grid-cols-2">
+        {imageAssets.map((asset) => {
+          const src = codeJobAssetUrl(job.id, asset.id);
+          return (
+            <div key={asset.id} className="rounded-lg border bg-secondary/20 p-2">
+              <img src={src} alt={asset.filename || "Generated KiraAI image"} className="aspect-square w-full rounded-md border bg-white object-contain" />
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate text-xs text-muted-foreground">{asset.filename || `asset-${asset.id}`}</span>
+                <Button asChild size="sm" variant="outline">
+                  <a href={src} target="_blank" rel="noreferrer">
+                    <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                    Open full size
+                  </a>
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -526,6 +688,7 @@ function DiffLine({ line }) {
 function projectSessionStatus(project, session = {}) {
   const status = session.job?.status;
   if (status === "awaiting_review") return { label: "Review", variant: "default" };
+  if (status === "done") return { label: "Done", variant: "secondary" };
   if (["queued", "planning", "running"].includes(status) && Number(session.job?.resume_count || 0) > 0) return { label: "Resumed", variant: "secondary" };
   if (["queued", "planning", "running"].includes(status)) return { label: "Running", variant: "secondary" };
   if (status === "applied") return { label: "Applied", variant: "secondary" };
@@ -575,22 +738,42 @@ function isNoisyTerminalText(value) {
     "redis",
     "node_modules",
     "docker compose",
-    "schema applied"
+    "schema applied",
+    "kiraai engine still running"
   ].some((needle) => text.includes(needle));
+}
+
+function looksLikeTerminalCodeSnippet(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (/^[+-]\s*(const|let|var|if|return|throw|reader\.|set[A-Z]|[A-Za-z0-9_$]+\()/u.test(text)) return true;
+  if (/^[+-]\s*\{?error\s*&&/u.test(text)) return true;
+  if (/^(const|let|var)\s+\[?error\b/u.test(text)) return true;
+  if (/^(if|return|throw)\s*\(/u.test(text)) return true;
+  if (/^set[A-Z][A-Za-z0-9_$]*\(/u.test(text)) return true;
+  if (/^\{?error\s*&&/u.test(text)) return true;
+  if (/^\.error\s*\{/u.test(text)) return true;
+  return false;
+}
+
+function isRealTerminalErrorText(value) {
+  const text = String(value || "").trim();
+  const lower = text.toLowerCase();
+  if (!text || looksLikeTerminalCodeSnippet(text)) return false;
+  if (/^(error|fatal|failed|failure):\s/i.test(text)) return true;
+  if (/^#?\s*error\s+\[[A-Z0-9_]+\]/.test(text)) return true;
+  if (/\b(err_module_not_found|err_[a-z0-9_]+)\b/i.test(text)) return true;
+  if (/\b(cannot find module|cannot find package|module not found|package not found)\b/i.test(text)) return true;
+  if (/\b(test failed|build failed|verification failed|command failed|timed out|permission denied)\b/i.test(text)) return true;
+  if (lower.startsWith("npm err!") || lower.startsWith("pnpm err") || lower.startsWith("yarn error")) return true;
+  return false;
 }
 
 function isImportantTerminalText(value) {
   const text = String(value || "").toLowerCase();
   if (!text) return false;
+  if (isRealTerminalErrorText(value)) return true;
   return [
-    "error",
-    "failed",
-    "fatal",
-    "timed out",
-    "timeout",
-    "not found",
-    "permission",
-    "denied",
     "created",
     "updated",
     "changed",
@@ -605,11 +788,14 @@ function shouldShowTerminalLog(log) {
   const message = String(log?.message || "");
   const rawLine = String(log?.data?.line || "");
   const rawError = String(log?.data?.error || "");
+  if (message === "KiraAI engine still running") return false;
   if (/^kiraai (stdout|stderr)$/i.test(message)) {
     if (isNoisyTerminalText(rawLine)) return false;
+    if (looksLikeTerminalCodeSnippet(rawLine)) return false;
     return isImportantTerminalText(rawLine);
   }
   if ((isNoisyTerminalText(rawLine) || isNoisyTerminalText(rawError)) && !isImportantTerminalText(message)) return false;
+  if (looksLikeTerminalCodeSnippet(rawLine) && !isImportantTerminalText(rawLine)) return false;
   return true;
 }
 
@@ -664,6 +850,6 @@ function formatLogs(logs) {
 
 function latestError(logs) {
   const list = Array.isArray(logs) ? logs : [];
-  const entry = [...list].reverse().find((log) => log.data?.error || String(log.message || "").toLowerCase().includes("failed"));
-  return cleanTerminalText(entry?.data?.error || entry?.message || "");
+  const entry = [...list].reverse().find((log) => isRealTerminalErrorText(log.data?.error || log.data?.line || log.message));
+  return cleanTerminalText(entry?.data?.error || entry?.data?.line || entry?.message || "");
 }

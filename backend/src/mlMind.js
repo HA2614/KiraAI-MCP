@@ -13,7 +13,7 @@ const openai = config.openAiApiKey ? new OpenAI({ apiKey: config.openAiApiKey })
 const eventClients = new Map();
 const activeJobs = new Map();
 const RUNNER_ID = `ml-${process.pid}-${randomUUID()}`;
-const MIND_SELECTOR_VERSION = "fast-v15";
+const MIND_SELECTOR_VERSION = "fast-v18";
 
 const TEXT_EXTENSIONS = new Set([
   ".astro",
@@ -425,44 +425,6 @@ async function validatePublicGitHubRepo(jobId, source) {
   await runCommand(jobId, "git", ["ls-remote", "--exit-code", source.url, "HEAD"], {
     timeoutMs: 60000
   });
-}
-
-async function validatePublicGitHubUrl(url) {
-  await new Promise((resolve, reject) => {
-    const child = spawn("git", ["ls-remote", "--exit-code", url, "HEAD"], {
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-      stdio: ["ignore", "ignore", "pipe"]
-    });
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new ValidationError("Repo is private, missing, or unavailable; public repos only."));
-    }, 60000);
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", () => {
-      clearTimeout(timer);
-      reject(new ValidationError("Unable to run git public repo check."));
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(
-        new ValidationError(
-          "Repo is private, missing, or unavailable; public repos only.",
-          { stderr: stderr.trim() }
-        )
-      );
-    });
-  });
-}
-
-function isPublicRepoUnavailableError(error) {
-  return String(error?.message || "").includes("Repo is private, missing, or unavailable; public repos only.");
 }
 
 function shouldSkipPath(relativePath) {
@@ -1329,18 +1291,10 @@ async function runLearningJob(jobId, { resumed = false, reason = "" } = {}) {
       finishedAt: nowIso()
     }).catch(() => null);
     if (job?.source_id) {
-      if (isPublicRepoUnavailableError(error)) {
-        await appendLearningLog(jobId, "Removing unavailable public-only source", {
-          sourceId: job.source_id
-        }).catch(() => null);
-        await query("DELETE FROM ml_skills WHERE source_id=$1", [job.source_id]).catch(() => null);
-        await query("DELETE FROM ml_sources WHERE id=$1", [job.source_id]).catch(() => null);
-      } else {
-        await query(
-          "UPDATE ml_sources SET status=$2, last_error=$3, updated_at=NOW() WHERE id=$1",
-          [job.source_id, canceled ? "idle" : "failed", canceled ? null : error.message || "Learning failed"]
-        ).catch(() => null);
-      }
+      await query(
+        "UPDATE ml_sources SET status=$2, last_error=$3, updated_at=NOW() WHERE id=$1",
+        [job.source_id, canceled ? "idle" : "failed", canceled ? null : error.message || "Learning failed"]
+      ).catch(() => null);
     }
     await appendLearningLog(jobId, canceled ? "Learning canceled" : "Learning failed", {
       error: error.message,
@@ -1391,8 +1345,6 @@ export async function createSource(rawUrl, options = {}) {
   if (existing.rowCount) {
     return { ...existing.rows[0], duplicate: true };
   }
-
-  await validatePublicGitHubUrl(parsed.url);
 
   const row = await query(
     `INSERT INTO ml_sources (url, source_type, repo_owner, repo_name, name, input_hash, metadata_json)
@@ -1874,6 +1826,32 @@ function isButtonActionSkill(skill) {
   return /\b(button variant|submit button|cta button|form button|btn|primary action|call-to-action|submit)\b/.test(title + " " + text);
 }
 
+function isLoginImplementationSkill(skill) {
+  const text = skillText(skill);
+  if (/\b(contact form|newsletter|booking|pricing|portfolio|project grid|gallery|game|calculator|social link|social links|profile image|avatar)\b/.test(text)) return false;
+  const hasAuth = /\b(login|log in|auth|authentication|password|email|credential|credentials)\b/.test(text);
+  const hasForm = /\b(form|input|field|label|submit|button|checkbox|required|focus|accessibility|select)\b/.test(text);
+  const hasShell = /\b(card|panel|shell|layout|responsive|centered|setup screen|setup screens)\b/.test(text);
+  return (hasAuth && (hasForm || hasShell)) ||
+    (/\b(password|email)\b/.test(text) && /\b(form|input|field|label|submit|required)\b/.test(text));
+}
+
+function isLabeledFormControlSkill(skill) {
+  const text = skillText(skill);
+  if (/\b(fetch|server component|server components|data loading|async server|profile-style data)\b/.test(text)) return false;
+  if (/\b(contact form|newsletter|booking|pricing|portfolio|project grid|gallery|game|calculator)\b/.test(text)) return false;
+  return /\b(label|labels|labeled|aria-label)\b/.test(text) &&
+    /\b(form|forms|form controls|input|inputs|field|fields|select|control|required)\b/.test(text);
+}
+
+function isGenericLoginNoiseSkill(skill) {
+  const text = skillText(skill);
+  if (/\b(fetch|server component|server components|useeffect|data loading|async server|profile-style data)\b/.test(text)) return true;
+  if (/\b(action grid|resource list|card-container|card rows)\b/.test(text) && !isLoginImplementationSkill(skill)) return true;
+  if (isLoginImplementationSkill(skill) || isFormImplementationSkill(skill) || isButtonActionSkill(skill)) return false;
+  return false;
+}
+
 function isPricingImplementationSkill(skill) {
   const text = skillText(skill);
   if (/\b(contact|login|auth|profile|portfolio|project|game|calculator|newsletter)\b/.test(text)) return false;
@@ -1993,11 +1971,17 @@ function isSkillCompatibleWithPrompt(promptText, skill) {
 
   if (intent.wantsLogin) {
     if (!intent.wantsModal && /\b(modal|dialog|popup)\b/.test(text)) return false;
-    const hasFormOrActionPattern = /\b(card|form|input|label|submit|button|focus|required|email|password|accessibility|layout|responsive|checkbox|panel|shell)\b/.test(text);
     if (!intent.wantsSocialAuth && /\b(social link|social links|social navigation|social icon|profile image|avatar|profile card)\b/.test(text)) return false;
+    if (isGenericLoginNoiseSkill(skill)) return false;
     const clearlyUnrelated = /\b(game|canvas|calculator|board|timer|matching|memory card|project|portfolio|gallery|navigation|search|newsletter|booking|social link|profile image|avatar)\b/.test(text);
-    if (clearlyUnrelated && !isFormImplementationSkill(skill) && !isButtonActionSkill(skill) && !/\b(button|focus|input)\b/.test(text)) return false;
-    return hasFormOrActionPattern;
+    if (clearlyUnrelated && !isLoginImplementationSkill(skill) && !isFormImplementationSkill(skill) && !isButtonActionSkill(skill) && !/\b(button|focus|input)\b/.test(text)) return false;
+    const hasAuthOrCredential = /\b(login|auth|authentication|password|email|credential|credentials)\b/.test(text);
+    const hasControlPattern = /\b(form|input|field|label|submit|button|checkbox|select)\b/.test(text) ||
+      (/\b(focus|required|accessibility)\b/.test(text) && /\b(form|input|field|label|submit|button)\b/.test(text));
+    const hasLoginSpecificPattern = hasAuthOrCredential && hasControlPattern;
+    const hasLoginShellPattern = /\b(card|panel|shell|layout|responsive)\b/.test(text) &&
+      /\b(login|auth|password|email|form|input|label|submit)\b/.test(text);
+    return isLoginImplementationSkill(skill) || hasLoginSpecificPattern || hasLoginShellPattern || isFormImplementationSkill(skill) || isButtonActionSkill(skill);
   }
 
   if (intent.wantsProfileCard) {
@@ -2079,6 +2063,8 @@ function scoreSkillForPrompt(promptText, skill) {
   if (intent.wantsSaasProduct && isProductAppNoiseSkill(skill)) score -= 0.7;
   if (intent.wantsSaasProduct && !intent.wantsSocialLinks && /\b(social link|social links|social navigation|social icon)\b/.test(text)) score -= 0.45;
   if (intent.wantsSaasProduct && !intent.wantsExplicitHover && /\b(hover effects|image zoom|zoom effect|grayscale|color inversion|media hover|gallery overlay)\b/.test(text)) score -= 0.45;
+  if (intent.wantsLogin && isLoginImplementationSkill(skill)) score += 0.85;
+  if (intent.wantsLogin && isGenericLoginNoiseSkill(skill)) score -= 0.8;
   if (intent.wantsLogin && isFormImplementationSkill(skill)) score += 0.6;
   if (intent.wantsLogin && isButtonActionSkill(skill)) score += 0.28;
   if (intent.wantsLogin && /\b(form|input|label|submit|button|focus|required|email|password|accessibility|checkbox)\b/.test(text)) score += 0.3;
@@ -2134,6 +2120,8 @@ function ensureIntentCoverage(promptText, selectedSkills, rankedSkills) {
   if (intent.wantsBackend) addBest(isBackendImplementationSkill, { prepend: true });
   if (intent.wantsApiRoutes) addBest(isApiRouteImplementationSkill, { prepend: true });
   if (intent.wantsDatabase) addBest(isDatabaseImplementationSkill, { prepend: true });
+  if (intent.wantsLogin) addBest(isLoginImplementationSkill, { prepend: true });
+  if (intent.wantsLogin) addBest(isLabeledFormControlSkill, { prepend: true });
 
   if (intent.wantsLogin && !selected.some(isFormImplementationSkill)) {
     const formSkill = rankedSkills.find((skill) => isFormImplementationSkill(skill) && isSkillCompatibleWithPrompt(promptText, skill));

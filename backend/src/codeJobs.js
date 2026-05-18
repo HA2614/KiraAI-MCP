@@ -11,6 +11,7 @@ import { buildMindContextForPrompt } from "./mlMind.js";
 import { resolveCodexBinary } from "./codexBinary.js";
 import { fsDelete, fsWriteFile, resolveSafePath } from "./structure.js";
 import { createRunTimer, finishTimingSnapshot } from "./performanceTiming.js";
+import { generateImageAsset, normalizeSvgAssetContent, resolveImageProvider, shouldGenerateImage } from "./imageGeneration.js";
 
 const eventClients = new Map();
 const RUNNER_ID = `code-${process.pid}-${randomUUID()}`;
@@ -68,6 +69,46 @@ async function appendLog(jobId, message, data = {}) {
   return row.rows[0];
 }
 
+function publicAsset(row = {}) {
+  return {
+    id: row.id,
+    code_job_id: row.code_job_id,
+    asset_type: row.asset_type,
+    mime_type: row.mime_type,
+    filename: row.filename,
+    metadata_json: row.metadata_json || {},
+    created_at: row.created_at
+  };
+}
+
+async function listCodeJobAssets(jobId) {
+  const rows = await query(
+    `SELECT id, code_job_id, asset_type, mime_type, filename, metadata_json, created_at
+     FROM code_job_assets
+     WHERE code_job_id=$1
+     ORDER BY created_at ASC, id ASC`,
+    [jobId]
+  );
+  return rows.rows.map(publicAsset);
+}
+
+async function saveCodeJobAsset(jobId, asset) {
+  const row = await query(
+    `INSERT INTO code_job_assets (code_job_id, asset_type, mime_type, filename, content, metadata_json)
+     VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+     RETURNING id, code_job_id, asset_type, mime_type, filename, metadata_json, created_at`,
+    [
+      jobId,
+      asset.assetType || "image",
+      asset.mimeType,
+      asset.filename,
+      asset.content,
+      JSON.stringify(asset.metadata || {})
+    ]
+  );
+  return publicAsset(row.rows[0]);
+}
+
 async function setStatus(jobId, status, patch = {}) {
   const row = await query(
     `UPDATE code_jobs
@@ -84,6 +125,9 @@ async function setStatus(jobId, status, patch = {}) {
          finished_at=COALESCE($11, finished_at),
          duration_ms=COALESCE($12, duration_ms),
          stage_timings=COALESCE($13::jsonb, stage_timings),
+         response_markdown=COALESCE($14, response_markdown),
+         response_kind=COALESCE($15, response_kind),
+         response_metadata=COALESCE($16::jsonb, response_metadata),
          updated_at=NOW()
      WHERE id=$1
      RETURNING *`,
@@ -100,7 +144,10 @@ async function setStatus(jobId, status, patch = {}) {
       patch.startedAt ?? null,
       patch.finishedAt ?? null,
       patch.durationMs ?? null,
-      patch.stageTimings ? JSON.stringify(patch.stageTimings) : null
+      patch.stageTimings ? JSON.stringify(patch.stageTimings) : null,
+      patch.responseMarkdown ?? null,
+      patch.responseKind ?? null,
+      patch.responseMetadata ? JSON.stringify(patch.responseMetadata) : null
     ]
   );
   emit(jobId, { type: "status", job: row.rows[0] });
@@ -291,6 +338,8 @@ function buildCodePrompt({ improvedPrompt, rootPath }) {
     "Execute EXACTLY the task described below - no extra refactoring or unrelated changes.",
     "Edit files directly in the workspace. Do not output JSON; the app diffs the workspace automatically.",
     "Do not ask for approval. Do not edit node_modules, dist, build, coverage, .git, .next, .cache, or reports.",
+    "If you add or use a third-party package, update the correct package.json dependency entry. Prefer existing dependencies or built-in APIs when practical.",
+    "If verification is blocked only by missing local dependencies, report that limitation and still finish the reviewable code proposal.",
     "When done, write a short plain-text summary of what changed and any commands to verify.",
     "",
     `Workspace: ${rootPath}`,
@@ -369,6 +418,7 @@ function shouldKeepCodexLogLine(line) {
   if (!text) return false;
   const lower = text.toLowerCase();
   if (isNoisyCodexLogLine(lower)) return false;
+  if (looksLikeCodeSnippet(text)) return false;
   if (text === "--------" || text === "user") return false;
   if (text === "{" || text === "}" || text === "}," || text === "]," || text === "],") return false;
   if (text.startsWith('"') || text.startsWith("- ")) return false;
@@ -395,10 +445,37 @@ function shouldKeepCodexLogLine(line) {
     lower.startsWith("approval:") ||
     lower.startsWith("exec") ||
     lower.startsWith("codex") ||
-    lower.includes("error") ||
-    lower.includes("failed") ||
+    isRealErrorLogLine(text) ||
+    lower.includes("verification failed") ||
     lower.includes("succeeded")
   );
+}
+
+function looksLikeCodeSnippet(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return false;
+  if (/^[+-]\s*(const|let|var|if|return|throw|reader\.|set[A-Z]|[A-Za-z0-9_$]+\()/u.test(trimmed)) return true;
+  if (/^[+-]\s*\{?error\s*&&/u.test(trimmed)) return true;
+  if (/^(const|let|var)\s+\[?error\b/u.test(trimmed)) return true;
+  if (/^(if|return|throw)\s*\(/u.test(trimmed)) return true;
+  if (/^set[A-Z][A-Za-z0-9_$]*\(/u.test(trimmed)) return true;
+  if (/^\{?error\s*&&/u.test(trimmed)) return true;
+  if (/^\.error\s*\{/u.test(trimmed)) return true;
+  if (/^["'`].*["'`][,;]?$/.test(trimmed) && trimmed.length < 180) return true;
+  return false;
+}
+
+function isRealErrorLogLine(text) {
+  const trimmed = String(text || "").trim();
+  const lower = trimmed.toLowerCase();
+  if (!trimmed) return false;
+  if (/^(error|fatal|failed|failure):\s/i.test(trimmed)) return true;
+  if (/^#?\s*error\s+\[[A-Z0-9_]+\]/.test(trimmed)) return true;
+  if (/\b(err_module_not_found|err_[a-z0-9_]+)\b/i.test(trimmed)) return true;
+  if (/\b(cannot find module|cannot find package|module not found|package not found)\b/i.test(trimmed)) return true;
+  if (/\b(test failed|build failed|verification failed|command failed|timed out|permission denied)\b/i.test(trimmed)) return true;
+  if (lower.startsWith("npm err!") || lower.startsWith("pnpm err") || lower.startsWith("yarn error")) return true;
+  return false;
 }
 
 function shouldCopyToIsolatedWorkspace(sourcePath) {
@@ -418,6 +495,124 @@ function shouldCopyToIsolatedWorkspace(sourcePath) {
     "__pycache__"
   ]);
   return !sourcePath.split(path.sep).some((part) => excludedNames.has(part));
+}
+
+async function pathExists(targetPath) {
+  try {
+    await stat(targetPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function readPackageJson(packagePath) {
+  try {
+    return JSON.parse(await readFile(packagePath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function packageJsonHasWorkspaces(packageJson = {}) {
+  return Boolean(packageJson.workspaces) ||
+    (Array.isArray(packageJson.packages) && packageJson.packages.length > 0);
+}
+
+async function findPackageInstallDirs(root, current = root, depth = 0, found = []) {
+  if (found.length >= 8 || depth > 3) return found;
+  let entries = [];
+  try {
+    entries = await readdir(current, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+
+  const hasPackageJson = entries.some((entry) => entry.isFile() && entry.name === "package.json");
+  if (hasPackageJson) {
+    found.push(current);
+    const packageJson = await readPackageJson(path.join(current, "package.json"));
+    if (current === root && packageJsonHasWorkspaces(packageJson)) return found;
+  }
+
+  const skip = new Set(["node_modules", ".git", "dist", "build", "coverage", ".next", ".cache"]);
+  for (const entry of entries) {
+    if (found.length >= 8) break;
+    if (!entry.isDirectory() || skip.has(entry.name)) continue;
+    await findPackageInstallDirs(root, path.join(current, entry.name), depth + 1, found);
+  }
+  return found;
+}
+
+function npmCommand() {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+async function runDependencyInstall(directory) {
+  const hasLock = await pathExists(path.join(directory, "package-lock.json"));
+  const commonArgs = ["--ignore-scripts", "--no-audit", "--no-fund"];
+  if (!hasLock) return runPackageCommand(directory, ["install", ...commonArgs]);
+  try {
+    return await runPackageCommand(directory, ["ci", ...commonArgs]);
+  } catch {
+    return runPackageCommand(directory, ["install", ...commonArgs]);
+  }
+}
+
+async function runPackageCommand(directory, args) {
+  const command = npmCommand();
+  const timeoutMs = Math.max(10000, Number(config.codeJobPrepareDepsTimeoutMs || 180000));
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: directory,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new ExternalServiceError(`dependency install timed out after ${timeoutMs}ms`, null, "CODE_JOB_DEPENDENCY_TIMEOUT"));
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.length > 4000) stdout = stdout.slice(-4000);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > 4000) stderr = stderr.slice(-4000);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new ExternalServiceError(`dependency install failed with code ${code}`, { stdout, stderr }, "CODE_JOB_DEPENDENCY_FAILED"));
+    });
+  });
+}
+
+async function prepareIsolatedDependencies(jobId, workDir) {
+  if (!config.codeJobPrepareDeps) return;
+  const dirs = [...new Set(await findPackageInstallDirs(workDir))];
+  if (!dirs.length) return;
+
+  await appendLog(jobId, "Preparing workspace dependencies", { packageRoots: dirs.length });
+  for (const directory of dirs) {
+    const relativeDir = relativeWorkspacePath(workDir, directory) || ".";
+    try {
+      await runDependencyInstall(directory);
+      await appendLog(jobId, "Workspace dependencies ready", { path: relativeDir });
+    } catch (error) {
+      await appendLog(jobId, "Dependency prep failed; verification may be limited", {
+        path: relativeDir,
+        error: error.message,
+        code: error.code || "CODE_JOB_DEPENDENCY_PREP_FAILED"
+      });
+    }
+  }
 }
 
 function relativeWorkspacePath(root, filePath) {
@@ -688,6 +883,96 @@ function extractSuggestedCommands(summary = "") {
   return commands.length ? commands : ["Review the proposed changed files before accepting."];
 }
 
+function compactList(items = [], limit = 8) {
+  return (Array.isArray(items) ? items : [])
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+export function buildCodeResponseMarkdown({ diffSummary = "", changedFiles = [], riskNotes = [], testCommands = [], codexSummary = "" } = {}) {
+  const files = compactList(changedFiles, 8).map((file) => `- ${file.path} (+${Number(file.additions || 0)} -${Number(file.deletions || 0)})`);
+  const risks = compactList(riskNotes, 6).map((item) => `- ${item}`);
+  const tests = compactList(testCommands, 6).map((item) => `- \`${item}\``);
+  const summaryLine = String(diffSummary || "").trim() || "KiraAI heeft de opdracht verwerkt.";
+  const modelNotes = String(codexSummary || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.startsWith("```"))
+    .slice(0, 3)
+    .join(" ");
+
+  return [
+    "## Gedaan",
+    summaryLine,
+    modelNotes ? `\n${modelNotes}` : "",
+    "",
+    "## Hoe starten/testen",
+    tests.length ? tests.join("\n") : "- Review de voorgestelde diff en run de normale project checks.",
+    "",
+    "## Bestanden geraakt",
+    files.length ? files.join("\n") : "- Geen projectbestanden gewijzigd.",
+    "",
+    "## Risico's / aandachtspunten",
+    risks.length ? risks.join("\n") : "- Geen specifieke aandachtspunten gemeld."
+  ].join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function imageEstimatedDurationLabel(provider = resolveImageProvider(config.imageProvider)) {
+  if (provider === "fake") return "enkele seconden";
+  return "ongeveer 1 tot 2 minuten";
+}
+
+function buildImageStartResponseMarkdown({ prompt = "", provider = resolveImageProvider(config.imageProvider) } = {}) {
+  const preview = String(prompt || "").replace(/\s+/g, " ").trim().slice(0, 220);
+  const providerLabel = provider === "codex_cli" ? "Codex" : "KiraAI";
+  return [
+    "## Ik ga dit maken",
+    preview
+      ? `Oké, ik ga nu een afbeelding maken van: ${preview}`
+      : "Oké, ik ga nu een afbeelding maken op basis van je prompt.",
+    `Dit duurt meestal ${imageEstimatedDurationLabel(provider)}.`,
+    "",
+    "## Status",
+    `${providerLabel} is bezig met genereren. Zodra de afbeelding klaar is, verschijnt de preview hieronder in de response box.`,
+    "De afbeelding wordt als KiraAI job asset bewaard, niet als bestand in je projectfolder."
+  ].join("\n");
+}
+
+function buildImageResponseMarkdown({ prompt = "", asset } = {}) {
+  return [
+    "## Gedaan",
+    "Klaar, ik heb een visueel voorbeeld gegenereerd op basis van je prompt.",
+    "",
+    "## Hoe gebruiken",
+    "- Open de afbeelding hieronder als referentie voor wireframes, layout of designrichting.",
+    "- De preview staat in de response box. Er wordt geen PNG/SVG in je projectfolder geschreven.",
+    "- Er zijn geen projectbestanden aangepast en er is niets om te accepteren of te rejecten.",
+    "",
+    "## Bestanden geraakt",
+    "- Geen projectbestanden gewijzigd.",
+    "",
+    "## Aandachtspunten",
+    "- Merknamen worden als algemene stijlreferentie gebruikt, niet als officieel logo of exacte merk-assets.",
+    asset?.metadata_json?.model ? `- Image model: ${asset.metadata_json.model}` : "",
+    prompt ? `- Prompt: ${String(prompt).trim().slice(0, 220)}` : ""
+  ].filter((line) => line !== "").join("\n");
+}
+
+function buildFailureResponseMarkdown(error) {
+  return [
+    "## Gedaan",
+    "KiraAI kon deze job niet afronden.",
+    "",
+    "## Aandachtspunten",
+    `- ${error?.message || "Onbekende fout."}`,
+    error?.code ? `- Code: ${error.code}` : "",
+    "",
+    "## Hoe verder",
+    "- Gebruik Retry om dezelfde prompt opnieuw te proberen nadat de oorzaak is opgelost."
+  ].filter((line) => line !== "").join("\n");
+}
+
 async function collectWorkspaceChanges(beforeSnapshot, workDir) {
   const afterSnapshot = await snapshotWorkspace(workDir);
   const allPaths = [...new Set([...beforeSnapshot.keys(), ...afterSnapshot.keys()])].sort();
@@ -760,6 +1045,8 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
     recursive: true,
     filter: (sourcePath) => shouldCopyToIsolatedWorkspace(sourcePath)
   });
+  if (timer) await markCodeJobStage(jobId, timer, "workspace_dependencies");
+  await prepareIsolatedDependencies(jobId, workDir);
   const beforeSnapshot = await snapshotWorkspace(workDir, { includeContent: true });
   await appendLog(jobId, "Isolated workspace ready", { durationMs: Date.now() - copyStartedAt });
   if (timer) {
@@ -913,12 +1200,32 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
   }
 }
 
-export async function startCodeJob({ projectId, rootPath, userPrompt, jobType = "prompt", title = "", requestMetadata = {} }) {
+function normalizeResponseMode(value) {
+  const mode = String(value || "auto").toLowerCase();
+  if (!["auto", "code", "image"].includes(mode)) throw new ValidationError("responseMode must be auto, code, or image");
+  return mode;
+}
+
+export async function startCodeJob({ projectId, rootPath, userPrompt, jobType = "prompt", title = "", requestMetadata = {}, responseMode = "auto" }) {
   const resolved = await resolveCodeJobRoot({ projectId, rootPath });
   if (!userPrompt?.trim()) throw new ValidationError("Prompt is required");
+  const normalizedResponseMode = normalizeResponseMode(responseMode || requestMetadata?.responseMode || "auto");
+  const imageProvider = resolveImageProvider(config.imageProvider);
+  const willGenerateImage = shouldGenerateImage({ prompt: userPrompt, responseMode: normalizedResponseMode });
+  const metadata = {
+    ...(requestMetadata || {}),
+    responseMode: normalizedResponseMode
+  };
+  const responseMetadata = willGenerateImage
+    ? {
+        responseMode: normalizedResponseMode,
+        imageProvider,
+        estimatedDuration: imageEstimatedDurationLabel(imageProvider)
+      }
+    : {};
   const created = await query(
-    `INSERT INTO code_jobs (project_id, root_path, user_prompt, model, status, job_type, title, request_metadata)
-     VALUES ($1,$2,$3,$4,'queued',$5,$6,$7::jsonb)
+    `INSERT INTO code_jobs (project_id, root_path, user_prompt, model, status, job_type, title, request_metadata, response_kind, response_markdown, response_metadata)
+     VALUES ($1,$2,$3,$4,'queued',$5,$6,$7::jsonb,$8,$9,$10::jsonb)
      RETURNING *`,
     [
       resolved.projectId,
@@ -927,7 +1234,10 @@ export async function startCodeJob({ projectId, rootPath, userPrompt, jobType = 
       config.codeAiModel,
       jobType || "prompt",
       title || null,
-      JSON.stringify(requestMetadata || {})
+      JSON.stringify(metadata),
+      willGenerateImage ? "image" : "code",
+      willGenerateImage ? buildImageStartResponseMarkdown({ prompt: userPrompt, provider: imageProvider }) : null,
+      JSON.stringify(responseMetadata)
     ]
   );
   const job = created.rows[0];
@@ -946,20 +1256,32 @@ export async function startStructureCodeJob({ projectId, preset = "full_stack", 
     userPrompt: prompt,
     jobType: "structure",
     title: "Full-stack structure proposal",
+    responseMode: "code",
     requestMetadata: {
       preset,
-      instructions: String(instructions || "").trim()
+      instructions: String(instructions || "").trim(),
+      responseMode: "code"
     }
   });
 }
 
 async function failCodeJob(jobId, error) {
+  const current = await query("SELECT response_kind, response_metadata FROM code_jobs WHERE id=$1 LIMIT 1", [jobId]).catch(() => ({ rows: [] }));
+  const currentRow = current.rows?.[0] || {};
   await appendLog(jobId, "Job failed", {
     error: error.message,
     code: error.code || "CODE_JOB_FAILED",
     details: error.details || null
   }).catch(() => null);
-  await setStatus(jobId, "failed", { finalStatus: "failed" }).catch(() => null);
+  await setStatus(jobId, "failed", {
+    finalStatus: "failed",
+    responseMarkdown: buildFailureResponseMarkdown(error),
+    responseKind: currentRow.response_kind || "code",
+    responseMetadata: {
+      ...(currentRow.response_metadata || {}),
+      errorCode: error.code || "CODE_JOB_FAILED"
+    }
+  }).catch(() => null);
   await finishCodeJobTiming(jobId, "failed", {
     errorCode: error.code || "CODE_JOB_FAILED"
   }).catch(() => null);
@@ -1016,6 +1338,56 @@ export async function runCodeJob(jobId, { resumed = false, reason = "" } = {}) {
       reason: reason || job.resume_reason || "server_restart",
       checkpoint: job.improved_prompt ? "saved_prompt" : "planning"
     });
+  }
+
+  const requestMetadata = job.request_metadata && typeof job.request_metadata === "object" ? job.request_metadata : {};
+  const responseMode = normalizeResponseMode(requestMetadata.responseMode || "auto");
+  if (shouldGenerateImage({ prompt: job.user_prompt, responseMode })) {
+    const imageProvider = resolveImageProvider(config.imageProvider);
+    const estimatedDuration = imageEstimatedDurationLabel(imageProvider);
+    await markCodeJobStage(jobId, timer, "image_generation");
+    await setStatus(jobId, "running", {
+      responseKind: "image",
+      responseMarkdown: buildImageStartResponseMarkdown({ prompt: job.user_prompt, provider: imageProvider }),
+      responseMetadata: {
+        responseMode,
+        imageProvider,
+        estimatedDuration
+      }
+    });
+    await appendLog(jobId, "Generating image response", {
+      provider: imageProvider,
+      configuredProvider: config.imageProvider,
+      model: imageProvider === "codex_cli" ? config.imageCodexModel : imageProvider
+    });
+    const generated = await measureTimerStage(timer, "image_provider", () => generateImageAsset({ prompt: job.user_prompt }));
+    const asset = await saveCodeJobAsset(jobId, generated);
+    await saveCodeJobTiming(jobId, timer);
+    const responseMarkdown = buildImageResponseMarkdown({ prompt: job.user_prompt, asset });
+    job = await setStatus(jobId, "done", {
+      changedFiles: [],
+      diffSummary: "Generated 1 image asset. No project files were changed.",
+      riskNotes: ["Image-only job. Project files are untouched."],
+      testCommands: ["Open the generated image preview."],
+      finalStatus: "done",
+      responseMarkdown,
+      responseKind: "image",
+      responseMetadata: {
+        responseMode,
+        imageProvider,
+        estimatedDuration,
+        assetIds: [asset.id],
+        assetCount: 1
+      }
+    });
+    job = await finishCodeJobTiming(jobId, "done", { assets: 1 }) || job;
+    await appendLog(jobId, "Image response ready", {
+      assetId: asset.id,
+      durationMs: job.duration_ms || null
+    });
+    const fullJob = await getCodeJob(jobId);
+    emit(jobId, { type: "status", job: fullJob });
+    return fullJob;
   }
 
   let improvedPrompt = job.improved_prompt;
@@ -1082,13 +1454,27 @@ export async function runCodeJob(jobId, { resumed = false, reason = "" } = {}) {
     ...skippedFiles.map((file) => `${file.path}: ${file.diffSummary}`)
   ];
   const testCommands = extractSuggestedCommands(payload.codexSummary);
+  const responseMarkdown = buildCodeResponseMarkdown({
+    diffSummary,
+    changedFiles,
+    riskNotes,
+    testCommands,
+    codexSummary: payload.codexSummary
+  });
   job = await setStatus(jobId, "awaiting_review", {
     improvedPrompt,
     changedFiles,
     diffSummary,
     riskNotes,
     testCommands,
-    finalStatus: "awaiting_review"
+    finalStatus: "awaiting_review",
+    responseMarkdown,
+    responseKind: "code",
+    responseMetadata: {
+      changedFileCount: changedFiles.length,
+      additions,
+      deletions
+    }
   });
   job = await finishCodeJobTiming(jobId, "awaiting_review", { changedFiles: changedFiles.length }) || job;
   await appendLog(jobId, "Code proposal ready", {
@@ -1108,7 +1494,26 @@ export async function getCodeJob(jobId) {
     [jobId]
   );
   if (!row.rowCount) throw new NotFoundError("Code job not found");
-  return row.rows[0];
+  const job = row.rows[0];
+  job.assets = await listCodeJobAssets(jobId);
+  job.asset_count = job.assets.length;
+  return job;
+}
+
+export async function getCodeJobAsset(jobId, assetId) {
+  const row = await query(
+    `SELECT id, code_job_id, asset_type, mime_type, filename, content, metadata_json, created_at
+     FROM code_job_assets
+     WHERE code_job_id=$1 AND id=$2
+     LIMIT 1`,
+    [jobId, assetId]
+  );
+  if (!row.rowCount) throw new NotFoundError("Code job asset not found");
+  const asset = row.rows[0];
+  if (String(asset.mime_type || "").toLowerCase().includes("image/svg+xml")) {
+    asset.content = normalizeSvgAssetContent(asset.content);
+  }
+  return asset;
 }
 
 export async function listCodeJobs(limit = 20, offset = 0, filters = {}) {
@@ -1132,9 +1537,14 @@ export async function listCodeJobs(limit = 20, offset = 0, filters = {}) {
   const offsetIndex = params.length;
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = await query(
-    `SELECT c.*, p.name AS project_name, p.root_path AS project_root_path
+    `SELECT c.*, p.name AS project_name, p.root_path AS project_root_path, COALESCE(a.asset_count, 0)::int AS asset_count
      FROM code_jobs c
      LEFT JOIN projects p ON p.id = c.project_id
+     LEFT JOIN (
+       SELECT code_job_id, COUNT(*) AS asset_count
+       FROM code_job_assets
+       GROUP BY code_job_id
+     ) a ON a.code_job_id = c.id
      ${where}
      ORDER BY c.created_at DESC
      LIMIT $${limitIndex} OFFSET $${offsetIndex}`,

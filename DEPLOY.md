@@ -81,11 +81,12 @@ Set secrets in `.env` or in your deployment secret manager:
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 CODE_JOB_TIMEOUT_MS=900000
+IMAGE_PROVIDER=codex_cli
 ```
 
 Do not commit `.env`.
 
-With the default Docker setup, Codex login is required for Code Worker, Analyzer, and ML skill extraction. OpenAI keys are optional unless you configure OpenAI as the active provider or embedding provider.
+With the default Docker setup, Codex login is required for Code Worker, Analyzer, image generation, and ML skill extraction. OpenAI keys are optional unless you configure OpenAI as the active provider or embedding provider.
 
 ## Commands
 

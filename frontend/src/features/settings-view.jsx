@@ -24,8 +24,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
-
-const ACTIVE_JOB_STATUSES = new Set(["queued", "running"]);
+import { ACTIVE_JOB_STATUSES, upsertById, useMlJobEvents } from "@/features/ml-panel-events";
 
 export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefaultSettings }) {
   const [mlStatus, setMlStatus] = useState(null);
@@ -59,29 +58,7 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
     refreshMlPanel({ silent: true }).catch(() => null);
   }, [showArchivedSources]);
 
-  useEffect(() => {
-    if (!activeJobIds.length) return undefined;
-    const streams = activeJobIds.map((jobId) => {
-      const stream = openMlJobEvents(jobId);
-      stream.addEventListener("ml-job", (event) => {
-        const payload = JSON.parse(event.data || "{}");
-        if (payload.job) {
-          setJobs((prev) => (
-            ACTIVE_JOB_STATUSES.has(payload.job.status)
-              ? upsertById(prev, payload.job)
-              : prev.filter((job) => Number(job.id) !== Number(payload.job.id))
-          ));
-        }
-      });
-      stream.onerror = () => stream.close();
-      return stream;
-    });
-    const poll = setInterval(() => refreshMlPanel({ silent: true }).catch(() => null), 3000);
-    return () => {
-      streams.forEach((stream) => stream.close());
-      clearInterval(poll);
-    };
-  }, [activeJobIds.join("|")]);
+  useMlJobEvents({ activeJobIds, openMlJobEvents, setJobs, refreshMlPanel });
 
   async function refreshMlPanel({ silent = false } = {}) {
     if (!silent) {
@@ -116,10 +93,10 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
     setMlError("");
     setMlNotice("");
     try {
-      const result = await apiPost("/ml/sources/batch", { text });
+      const result = await apiPost("/ml/sources/batch", { text }, { timeout: 45000 });
       setRepoLinks("");
       const totals = result.totals || {};
-      setMlNotice(`Sources checked: ${totals.created || 0} added and learning started, ${totals.duplicates || 0} duplicates skipped, ${totals.invalid || 0} invalid/private failed.`);
+      setMlNotice(`Sources queued: ${totals.created || 0} added and learning started, ${totals.duplicates || 0} duplicates skipped, ${totals.invalid || 0} invalid URL(s) skipped.`);
       await refreshMlPanel({ silent: true });
     } catch (error) {
       setMlError(error.message || "Failed to add KiraAI sources");
@@ -514,8 +491,9 @@ function Metric({ label, value }) {
 }
 
 function SourceRow({ source, onLearn, onToggle, onDelete }) {
+  const status = sourceStatusInfo(source);
   return (
-    <div className="rounded-md border p-3">
+    <div className={cn("rounded-md border p-3", status.tone === "failed" && "border-red-200 bg-red-50/40")}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -523,7 +501,7 @@ function SourceRow({ source, onLearn, onToggle, onDelete }) {
             <Badge variant="outline">{source.source_type || "github"}</Badge>
             {source.archived ? <Badge variant="secondary">archived</Badge> : null}
             <Badge variant={source.enabled ? "default" : "secondary"}>{source.enabled ? "enabled" : "disabled"}</Badge>
-            <Badge variant="outline">{source.status}</Badge>
+            <Badge variant={status.variant} className={status.className}>{status.label}</Badge>
           </div>
           <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{source.url}</div>
           <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
@@ -551,6 +529,23 @@ function SourceRow({ source, onLearn, onToggle, onDelete }) {
       </div>
     </div>
   );
+}
+
+function sourceStatusInfo(source = {}) {
+  const raw = String(source.status || "idle").toLowerCase();
+  if (source.archived && raw === "learned") return { label: "learned", variant: "default", tone: "done" };
+  if (raw === "learning") return { label: "learning", variant: "secondary", tone: "active" };
+  if (raw === "learned") return { label: "learned", variant: "default", tone: "done" };
+  if (raw === "failed") {
+    return {
+      label: "failed",
+      variant: "outline",
+      tone: "failed",
+      className: "border-red-200 bg-red-50 text-red-700"
+    };
+  }
+  if (raw === "idle") return { label: "idle", variant: "outline", tone: "idle" };
+  return { label: raw || "idle", variant: "outline", tone: "idle" };
 }
 
 function SkillRow({ skill, selected, onOpen, onToggle, onDelete }) {
@@ -648,11 +643,4 @@ function formatDuration(start, end) {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${seconds % 60}s`;
-}
-
-function upsertById(items, nextItem) {
-  const list = Array.isArray(items) ? items : [];
-  const index = list.findIndex((item) => Number(item.id) === Number(nextItem.id));
-  if (index === -1) return [nextItem, ...list];
-  return list.map((item, i) => (i === index ? { ...item, ...nextItem } : item));
 }
