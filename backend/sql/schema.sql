@@ -203,17 +203,6 @@ ALTER TABLE ml_sources ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEF
 ALTER TABLE ml_sources ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE ml_sources ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP;
 ALTER TABLE ml_sources ADD COLUMN IF NOT EXISTS archive_reason TEXT;
-UPDATE ml_sources
-SET archived=TRUE,
-    archived_at=COALESCE(archived_at, last_learned_at, updated_at, NOW()),
-    archive_reason=COALESCE(archive_reason, 'Learning complete; skills are available.'),
-    updated_at=NOW()
-WHERE archived=FALSE
-  AND (
-    status='learned'
-    OR last_learned_at IS NOT NULL
-    OR EXISTS (SELECT 1 FROM ml_skills WHERE ml_skills.source_id=ml_sources.id)
-  );
 
 CREATE TABLE IF NOT EXISTS ml_learning_jobs (
   id SERIAL PRIMARY KEY,
@@ -287,6 +276,18 @@ CREATE TABLE IF NOT EXISTS ml_skills (
   updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
   UNIQUE (source_id, slug)
 );
+
+UPDATE ml_sources
+SET archived=TRUE,
+    archived_at=COALESCE(archived_at, last_learned_at, updated_at, NOW()),
+    archive_reason=COALESCE(archive_reason, 'Learning complete; skills are available.'),
+    updated_at=NOW()
+WHERE archived=FALSE
+  AND (
+    status='learned'
+    OR last_learned_at IS NOT NULL
+    OR EXISTS (SELECT 1 FROM ml_skills WHERE ml_skills.source_id=ml_sources.id)
+  );
 
 CREATE TABLE IF NOT EXISTS ml_prompt_usages (
   id SERIAL PRIMARY KEY,
