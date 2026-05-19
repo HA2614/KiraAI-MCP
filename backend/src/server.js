@@ -106,9 +106,24 @@ const staticDir = config.staticFrontendDir ? path.resolve(config.staticFrontendD
 const hasStaticBuild = existsSync(path.join(staticDir, "index.html"));
 
 if (hasStaticBuild) {
-  app.use(express.static(staticDir));
+  app.use(express.static(staticDir, {
+    index: false,
+    setHeaders: (res, filePath) => {
+      if (path.basename(filePath) === "index.html") {
+        res.setHeader("Cache-Control", "no-store");
+        return;
+      }
+      if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      }
+    }
+  }));
+  app.get("/assets/*", (_req, res) => {
+    res.status(404).type("text/plain").send("Frontend asset not found. Refresh the browser after the latest KiraAI rebuild.");
+  });
   app.get("*", (req, res, next) => {
     if (req.path.startsWith("/api")) return next();
+    res.setHeader("Cache-Control", "no-store");
     res.sendFile(path.join(staticDir, "index.html"));
   });
 } else {
