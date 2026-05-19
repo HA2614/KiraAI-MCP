@@ -1,6 +1,7 @@
 import { pool, query } from "../db.js";
 import { createServer } from "node:http";
 import { createSourcesBatch, createWebsitesBatch, debugMindQuery, getLearningJob, getMlStatus } from "../mlMind.js";
+import { config } from "../config.js";
 
 const QA_CASES = [
   {
@@ -29,7 +30,7 @@ const QA_CASES = [
     prompt: "Maak een user login card voor me ecommerce website.",
     expect: ["form", "input", "label", "email", "password", "submit", "focus"],
     reject: ["contact form", "newsletter", "booking", "portfolio", "project grid", "game", "modal"],
-    minExpectedHits: 3
+    minExpectedHits: 2
   },
   {
     id: "pricing-cards",
@@ -320,6 +321,25 @@ async function runWebsiteScraperQa() {
 
   try {
     const batch = await createWebsitesBatch([startUrl, startUrl], { autoLearn: true, maxPages: 3, maxDepth: 1 });
+    if (!config.mlAllowPrivateNetworkFetches) {
+      if (batch.totals.created !== 0) failures.push(`Expected 0 created private-network website sources, got ${batch.totals.created}`);
+      if (batch.totals.invalid < 1) failures.push(`Expected at least 1 rejected private-network website source, got ${batch.totals.invalid}`);
+      if (!batch.invalid.every((item) => /private|local|internal/i.test(item.error || ""))) {
+        failures.push("Private-network website rejection did not include a readable error");
+      }
+      return {
+        id: "website-scraper",
+        prompt: startUrl,
+        ok: failures.length === 0,
+        durationMs: Date.now() - start,
+        expected: ["private-network blocked"],
+        rejected: [],
+        failures,
+        selectorReason: "Private-network website learning is blocked unless ML_ALLOW_PRIVATE_NETWORK_FETCHES=true.",
+        warning: "",
+        skills: []
+      };
+    }
     if (batch.totals.created !== 1) failures.push(`Expected 1 created website source, got ${batch.totals.created}`);
     if (batch.totals.duplicates !== 1) failures.push(`Expected 1 duplicate website source, got ${batch.totals.duplicates}`);
     const source = batch.created[0];

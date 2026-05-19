@@ -5,7 +5,7 @@ export function Textarea({ className, ...props }) {
   return (
     <textarea
       className={cn(
-        "flex min-h-[100px] w-full rounded-md border bg-card px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "flex min-h-[100px] w-full rounded-md border border-input bg-background/50 px-3 py-2 text-sm text-foreground ring-offset-background transition-[border-color,background-color,box-shadow] duration-150 ease-[var(--ease-out)] placeholder:text-muted-foreground focus-visible:border-primary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
         className
       )}
       {...props}

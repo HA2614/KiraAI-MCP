@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -6,6 +6,7 @@ import express from "express";
 process.env.IMAGE_GENERATION_ENABLED = "true";
 process.env.IMAGE_PROVIDER = "fake";
 process.env.IMAGE_MAX_PER_JOB = "1";
+process.env.CODE_JOB_REQUIRE_LEARNED_SKILLS = "false";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -25,7 +26,7 @@ async function waitForJob(getCodeJob, jobId) {
 async function main() {
   const { config } = await import("../config.js");
   const { pool } = await import("../db.js");
-  const { buildCodeResponseMarkdown, getCodeJob, getCodeJobAsset, startCodeJob } = await import("../codeJobs.js");
+  const { applyCodeJob, buildCodeResponseMarkdown, detectCodeJobWorkflow, getCodeJob, getCodeJobAsset, shouldUseStructureWorkflow, startCodeJob } = await import("../codeJobs.js");
   const { resolveImageProvider, shouldGenerateImage } = await import("../imageGeneration.js");
   const { router } = await import("../routes.js");
 
@@ -63,6 +64,38 @@ async function main() {
     assert(shouldGenerateImage({ prompt: "maak een foto", responseMode: "code" }) === false, "Code mode should force code responses");
     assert(shouldGenerateImage({ prompt: "refactor component", responseMode: "image" }) === true, "Image mode should force image responses");
     assert(shouldGenerateImage({ prompt: "maak een foto", responseMode: "auto" }) === true, "Auto mode should still detect visual prompts");
+    assert(shouldUseStructureWorkflow("maak een full-stack structure met frontend backend api database docker"), "Full-stack structure prompt should be detected");
+    assert(detectCodeJobWorkflow({ prompt: "maak een full-stack structure met frontend backend api database docker", responseMode: "auto" }) === "structure", "Auto mode should detect structure workflow");
+    assert(detectCodeJobWorkflow({ prompt: "fix button styling", responseMode: "auto" }) === "code", "Plain code prompt should stay a code workflow");
+    assert(detectCodeJobWorkflow({ prompt: "maak een full-stack structure", responseMode: "image" }) === "image", "Image mode should force image workflow");
+
+    const applyRoot = path.join(qaRoot, "apply-job");
+    const applyFile = path.join(applyRoot, "src", "message.txt");
+    await mkdir(path.dirname(applyFile), { recursive: true });
+    await writeFile(applyFile, "before\n", "utf8");
+    const applyRow = await pool.query(
+      `INSERT INTO code_jobs (root_path, user_prompt, model, status, changed_files, diff_summary, response_kind, final_status)
+       VALUES ($1,$2,$3,'awaiting_review',$4::jsonb,$5,'code','awaiting_review')
+       RETURNING id`,
+      [
+        applyRoot,
+        "QA: accept a reviewable text change",
+        "qa",
+        JSON.stringify([
+          {
+            path: "src/message.txt",
+            action: "upsert",
+            content: "after\n",
+            additions: 1,
+            deletions: 1
+          }
+        ]),
+        "1 file change: src/message.txt"
+      ]
+    );
+    const applied = await applyCodeJob(applyRow.rows[0].id);
+    assert(applied.status === "applied", `Apply should mark the job as applied, got ${applied.status}`);
+    assert(await readFile(applyFile, "utf8") === "after\n", "Accept Changes did not write the proposed file content");
 
     const app = express();
     app.use("/api", router);

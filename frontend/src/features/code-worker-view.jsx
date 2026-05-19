@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Bot, CheckCircle2, Clock3, ExternalLink, GitPullRequest, History, ImageIcon, Layers3, Play, Search, ShieldAlert, TerminalSquare, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, Clock3, ExternalLink, GitPullRequest, History, ImageIcon, Play, Search, ShieldAlert, TerminalSquare, XCircle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,7 +36,6 @@ export function CodeWorkerView({
   loadCodeHistory,
   openCodeHistoryJob,
   startCodeWorker,
-  startCodeStructureWorker,
   applyCurrentCodeJob,
   rejectCurrentCodeJob,
   resetCodeWorker
@@ -46,7 +45,6 @@ export function CodeWorkerView({
   const [nowMs, setNowMs] = useState(Date.now());
   const [historyScope, setHistoryScope] = useState("project");
   const [historyType, setHistoryType] = useState("");
-  const [structureInstructions, setStructureInstructions] = useState("");
   const [terminalOpen, setTerminalOpen] = useState(false);
   const files = Array.isArray(codeJob?.changed_files) ? codeJob.changed_files : [];
   const risks = Array.isArray(codeJob?.risk_notes) ? codeJob.risk_notes : [];
@@ -77,6 +75,7 @@ export function CodeWorkerView({
       : 0;
   const totalAdditions = files.reduce((sum, file) => sum + Number(file.additions || 0), 0);
   const totalDeletions = files.reduce((sum, file) => sum + Number(file.deletions || 0), 0);
+  const workflow = workflowInfo(codeJob, codeMode);
 
   const filteredProjects = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -112,11 +111,6 @@ export function CodeWorkerView({
     setHistoryType(nextType);
     setHistoryScope(nextScope);
     await loadCodeHistory(selectedProjectId, { type: nextType, scope: nextScope });
-  }
-
-  async function startStructure() {
-    const job = await startCodeStructureWorker?.({ instructions: structureInstructions.trim() });
-    if (job) setStructureInstructions("");
   }
 
   return (
@@ -268,59 +262,26 @@ export function CodeWorkerView({
                 </div>
               </div>
               {!selectedProject?.root_path ? (
-                <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+              <div className="state-warning rounded-lg border p-3 text-sm">
                   This project needs a workspace root before KiraAI can run. Set it from the Projects page.
                 </div>
               ) : null}
             </div>
 
-            <div className="rounded-lg border bg-background p-3">
-              <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="flex items-center gap-2 text-sm font-semibold">
-                    <Layers3 className="h-4 w-4 text-primary" />
-                    Full-stack Structure Workflow
-                  </p>
-                  <p className="text-xs text-muted-foreground">Creates frontend, backend, API routes, database schema, Docker, env and README as a reviewable proposal.</p>
-                </div>
-                <Badge variant="secondary">reviewable</Badge>
-              </div>
-              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
-                <Textarea
-                  className="min-h-[88px] resize-none text-sm"
-                  value={structureInstructions}
-                  onChange={(event) => setStructureInstructions(event.target.value)}
-                  placeholder="Optional structure instructions, e.g. use Express routes for users and files, include SQL migrations..."
-                  disabled={hasActiveJob && !finished}
-                />
-                <div className="grid content-start gap-2">
-                  <Button onClick={startStructure} disabled={!selectedProject?.root_path || codeBusy || hasActiveJob}>
-                    <Play className="mr-2 h-4 w-4" />
-                    Start Structure Job
-                  </Button>
-                  <div className="grid gap-1 text-xs text-muted-foreground">
-                    <span>Plan</span>
-                    <span>Query KiraAI skills</span>
-                    <span>Inspect project</span>
-                    <span>Generate proposal</span>
-                    <span>Collect diff</span>
-                    <span>Review</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_240px]">
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <label className="text-sm font-medium">Prompt</label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="text-sm font-medium">Prompt</label>
+                    <Badge variant={workflow.variant}>{workflow.label}</Badge>
+                  </div>
                   <ModeSelector value={codeMode} onChange={setCodeMode} disabled={hasActiveJob && !finished} />
                 </div>
                 <Textarea
-                  className="min-h-[190px] resize-none font-mono text-sm"
+                  className="min-h-[260px] resize-none font-mono text-sm"
                   value={codePrompt}
                   onChange={(event) => setCodePrompt(event.target.value)}
-                  placeholder="Describe the code change. Example: Refactor the analyzer cards and add empty states."
+                  placeholder="Describe what KiraAI should build or change. Example: Create a full-stack structure with Express API, SQL schema, Docker and README."
                   disabled={hasActiveJob && !finished}
                 />
               </div>
@@ -364,7 +325,7 @@ export function CodeWorkerView({
             </div>
 
             {codeJob?.status === "failed" ? (
-              <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+              <div className="state-danger rounded-lg border p-3 text-sm">
                 <div className="font-semibold">Code job failed</div>
                 <div>{latestError(logs) || "Click Show terminal for details."}</div>
               </div>
@@ -415,17 +376,17 @@ export function CodeWorkerView({
         </Card>
 
         {terminalOpen ? (
-          <Card className="overflow-hidden border-slate-900 bg-slate-950 text-slate-100">
-            <CardHeader className="border-b border-slate-800 py-3">
+          <Card className="terminal-panel overflow-hidden">
+            <CardHeader className="border-b border-border/70 py-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <CardTitle className="flex items-center gap-2 text-sm">
                   <TerminalSquare className="h-4 w-4" />
                   Web terminal
                 </CardTitle>
-                <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                   <span>{terminalStatusLabel(terminalStatus)}</span>
                   <span>{lastLogAt ? `last log ${new Date(lastLogAt).toLocaleTimeString()}` : "no logs yet"}</span>
-                  <Button size="sm" variant="ghost" className="h-7 px-2 text-slate-200 hover:bg-slate-800 hover:text-white" onClick={() => setTerminalOpen(false)}>
+                  <Button size="sm" variant="ghost" className="h-7 px-2 text-muted-foreground hover:bg-secondary hover:text-foreground" onClick={() => setTerminalOpen(false)}>
                     Hide
                   </Button>
                 </div>
@@ -493,6 +454,21 @@ function StatusBadge({ status, busy, resumeCount = 0 }) {
   return <Badge variant={status === "awaiting_review" ? "default" : "secondary"}>{label}</Badge>;
 }
 
+function workflowInfo(job, mode = "auto") {
+  if (job?.response_kind === "image") {
+    return { label: "Auto detected: Image", variant: "secondary" };
+  }
+  if (job?.job_type === "structure" || job?.request_metadata?.workflowKind === "structure") {
+    return { label: "Auto detected: Structure", variant: "secondary" };
+  }
+  if (job?.id) {
+    return { label: "Auto detected: Code", variant: "outline" };
+  }
+  if (mode === "image") return { label: "Image mode", variant: "secondary" };
+  if (mode === "code") return { label: "Code mode", variant: "outline" };
+  return { label: "Auto detects workflow", variant: "outline" };
+}
+
 function StatusStep({ label, active, current }) {
   return (
     <div className="flex items-center gap-2 py-1 text-sm">
@@ -555,8 +531,8 @@ function buildImagePendingResponse(prompt = "") {
   return [
     "## Ik ga dit maken",
     preview
-      ? `Oké, ik ga nu een afbeelding maken van: ${preview}`
-      : "Oké, ik ga nu een afbeelding maken op basis van je prompt.",
+      ? `Oke, ik ga nu een afbeelding maken van: ${preview}`
+      : "Oke, ik ga nu een afbeelding maken op basis van je prompt.",
     "Dit duurt meestal ongeveer 1 tot 2 minuten.",
     "",
     "## Status",
@@ -603,7 +579,7 @@ function AssetGallery({ job, assets = [] }) {
           const src = codeJobAssetUrl(job.id, asset.id);
           return (
             <div key={asset.id} className="rounded-lg border bg-secondary/20 p-2">
-              <img src={src} alt={asset.filename || "Generated KiraAI image"} className="aspect-square w-full rounded-md border bg-white object-contain" />
+              <img src={src} alt={asset.filename || "Generated KiraAI image"} className="aspect-square w-full rounded-md border border-border/70 bg-background/80 object-contain" />
               <div className="mt-2 flex items-center justify-between gap-2">
                 <span className="min-w-0 truncate text-xs text-muted-foreground">{asset.filename || `asset-${asset.id}`}</span>
                 <Button asChild size="sm" variant="outline">
@@ -626,8 +602,8 @@ function DiffStats({ additions = 0, deletions = 0, size = "sm" }) {
   const minus = Number(deletions || 0);
   return (
     <div className={cn("inline-flex shrink-0 items-center gap-1 font-mono font-semibold", size === "lg" ? "text-sm" : "text-xs")}>
-      <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-emerald-700">+{plus}</span>
-      <span className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-red-700">-{minus}</span>
+      <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">+{plus}</span>
+      <span className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-red-300">-{minus}</span>
     </div>
   );
 }
@@ -636,18 +612,18 @@ function DiffViewer({ file }) {
   const hunks = Array.isArray(file?.diffHunks) ? file.diffHunks : [];
   if (!hunks.length) {
     return (
-      <ScrollArea className="h-[520px] min-h-[360px] rounded-md border bg-slate-950 p-3 text-slate-100 xl:h-[calc(100vh-24rem)]">
+      <ScrollArea className="h-[520px] min-h-[360px] rounded-md border border-border/70 bg-[#0c0b0a] p-3 text-neutral-100 xl:h-[calc(100vh-24rem)]">
         <pre className="whitespace-pre-wrap text-xs">{file?.content || "No diff preview returned for this file."}</pre>
       </ScrollArea>
     );
   }
 
   return (
-    <ScrollArea className="h-[520px] min-h-[360px] rounded-md border bg-white xl:h-[calc(100vh-24rem)]">
+    <ScrollArea className="h-[520px] min-h-[360px] rounded-md border border-border/70 bg-background/80 xl:h-[calc(100vh-24rem)]">
       <div className="font-mono text-[12px] leading-5">
         {hunks.map((hunk, hunkIndex) => (
           <div key={`${hunk.oldStart}-${hunk.newStart}-${hunkIndex}`}>
-            <div className="border-b border-slate-200 bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+            <div className="border-b border-border/70 bg-secondary/50 px-3 py-1 text-xs font-semibold text-muted-foreground">
               @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
             </div>
             {(hunk.lines || []).map((line, lineIndex) => (
@@ -656,7 +632,7 @@ function DiffViewer({ file }) {
           </div>
         ))}
         {file?.diffTruncated ? (
-          <div className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <div className="state-warning border-t px-3 py-2 text-xs">
             Diff preview truncated. The full proposed file is still used when accepting changes.
           </div>
         ) : null}
@@ -672,14 +648,14 @@ function DiffLine({ line }) {
     <div
       className={cn(
         "grid grid-cols-[48px_48px_24px_minmax(0,1fr)] gap-2 px-2 py-0.5",
-        type === "add" && "bg-emerald-50 text-emerald-950",
-        type === "remove" && "bg-red-50 text-red-950",
-        type === "context" && "text-slate-700"
+        type === "add" && "bg-emerald-500/10 text-emerald-100",
+        type === "remove" && "bg-red-500/10 text-red-100",
+        type === "context" && "text-muted-foreground"
       )}
     >
-      <span className="select-none text-right text-slate-400">{line?.oldLine ?? ""}</span>
-      <span className="select-none text-right text-slate-400">{line?.newLine ?? ""}</span>
-      <span className={cn("select-none font-bold", type === "add" && "text-emerald-700", type === "remove" && "text-red-700")}>{sign}</span>
+      <span className="select-none text-right text-muted-foreground">{line?.oldLine ?? ""}</span>
+      <span className="select-none text-right text-muted-foreground">{line?.newLine ?? ""}</span>
+      <span className={cn("select-none font-bold", type === "add" && "text-emerald-300", type === "remove" && "text-red-300")}>{sign}</span>
       <span className="min-w-0 whitespace-pre-wrap break-words">{line?.text || ""}</span>
     </div>
   );

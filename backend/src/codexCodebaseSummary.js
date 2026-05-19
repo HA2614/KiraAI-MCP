@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { config } from "./config.js";
 import { resolveCodexBinary } from "./codexBinary.js";
-import { resolveSafePath } from "./structure.js";
+import { resolveExistingSafePath } from "./structure.js";
 import { ExternalServiceError } from "./errors.js";
 import { createRunTimer } from "./performanceTiming.js";
 
@@ -178,7 +178,7 @@ function shouldKeepLogLine(line) {
 export async function summarizeCodebaseWithCodex(targetPath, options = {}) {
   const onProgress = options.onProgress || null;
   const onLog = options.onLog || null;
-  const root = resolveSafePath(targetPath);
+  const root = await resolveExistingSafePath(targetPath);
   const timer = createRunTimer();
 
   const update = (progress, stage, message) => {

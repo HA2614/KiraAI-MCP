@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   Brain,
   CheckCircle2,
+  Download,
   GitBranch,
   Globe2,
   Pause,
@@ -213,6 +214,26 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
     }
   }
 
+  function exportSkillSources() {
+    const repoSources = sources
+      .filter((source) => String(source.source_type || "").toLowerCase() === "github")
+      .map((source) => source.url || source.name)
+      .filter(Boolean);
+    const unique = [...new Set(repoSources)];
+    const content = unique.length
+      ? unique.join("\n")
+      : "No GitHub skill sources found.";
+    const blob = new Blob([`${content}\n`], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "kiraai-skill-sources.txt";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <Tabs defaultValue="general" className="space-y-3">
       <TabsList className="flex w-fit flex-wrap">
@@ -263,6 +284,10 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
                   <Button variant="outline" onClick={() => setShowArchivedSources((value) => !value)}>
                     {showArchivedSources ? "Hide archived" : "Show archived"}
                   </Button>
+                  <Button variant="outline" onClick={exportSkillSources}>
+                    <Download className="mr-2 h-4 w-4" />
+                    Export sources
+                  </Button>
                   <Button variant="outline" onClick={() => refreshMlPanel()} disabled={mlBusy}>
                     <RefreshCcw className="mr-2 h-4 w-4" />
                     Refresh
@@ -272,8 +297,8 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
             </CardHeader>
             <CardContent className="grid gap-4 p-4">
               <StatusStrip status={mlStatus} />
-              {mlError ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{mlError}</p> : null}
-              {mlNotice ? <p className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">{mlNotice}</p> : null}
+              {mlError ? <p className="state-danger rounded-md border p-3 text-sm">{mlError}</p> : null}
+              {mlNotice ? <p className="state-success rounded-md border p-3 text-sm">{mlNotice}</p> : null}
 
               <div className="grid gap-3 xl:grid-cols-3">
                 <div className="grid gap-2 rounded-md border p-3">
@@ -377,7 +402,7 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
                     <Badge variant="outline">{debugResult.cacheHit ? "cache hit" : "cache miss"}</Badge>
                     <Badge variant="outline">{debugResult.durationMs ?? 0}ms</Badge>
                     {debugResult.selectorReason ? <span>{debugResult.selectorReason}</span> : null}
-                    {debugResult.warning ? <span className="text-amber-700">{debugResult.warning}</span> : null}
+                    {debugResult.warning ? <span className="text-amber-300">{debugResult.warning}</span> : null}
                   </div>
                   <ScrollArea className="h-[360px] rounded-md border bg-secondary/20 p-3">
                     <pre className="whitespace-pre-wrap text-xs">{debugResult.context || "No learned skills matched this prompt yet."}</pre>
@@ -394,7 +419,7 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
           <Card>
             <CardHeader>
               <CardTitle>KiraAI Skills</CardTitle>
-              <CardDescription>Enabled skills are used automatically by KiraAI prompt routing.</CardDescription>
+              <CardDescription>Enabled skills are a shared server library and are usable by every signed-in user.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-2">
               {skills.map((skill) => (
@@ -407,7 +432,11 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
                   onDelete={() => removeSkill(skill.id)}
                 />
               ))}
-              {!skills.length ? <p className="rounded-md border p-3 text-sm text-muted-foreground">No learned skills yet.</p> : null}
+              {!skills.length ? (
+                <p className="rounded-md border p-3 text-sm text-muted-foreground">
+                  No learned skills yet. Strict skill mode blocks Code Worker and image jobs until KiraAI learns server skills.
+                </p>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -493,7 +522,7 @@ function Metric({ label, value }) {
 function SourceRow({ source, onLearn, onToggle, onDelete }) {
   const status = sourceStatusInfo(source);
   return (
-    <div className={cn("rounded-md border p-3", status.tone === "failed" && "border-red-200 bg-red-50/40")}>
+    <div className={cn("rounded-md border border-border/70 p-3", status.tone === "failed" && "state-danger")}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -509,7 +538,7 @@ function SourceRow({ source, onLearn, onToggle, onDelete }) {
             <span>{source.chunk_count || 0} chunks</span>
             <span>{source.skill_count || 0} skills</span>
             {source.archive_reason ? <span>{source.archive_reason}</span> : null}
-            {source.last_error ? <span className="text-red-700">{source.last_error}</span> : null}
+            {source.last_error ? <span className="text-red-300">{source.last_error}</span> : null}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -541,7 +570,7 @@ function sourceStatusInfo(source = {}) {
       label: "failed",
       variant: "outline",
       tone: "failed",
-      className: "border-red-200 bg-red-50 text-red-700"
+      className: "border-red-500/30 bg-red-500/10 text-red-200"
     };
   }
   if (raw === "idle") return { label: "idle", variant: "outline", tone: "idle" };
@@ -612,8 +641,8 @@ function JobPanel({ job, onCancel }) {
         <span>{stats.skills || 0} skills</span>
         {job.runner_id ? <span>runner active</span> : null}
       </div>
-      {job.error?.message ? <p className="mt-2 rounded-md border border-red-200 bg-red-50 p-2 text-sm text-red-800">{job.error.message}</p> : null}
-      <ScrollArea className="mt-3 h-[160px] rounded-md border bg-slate-950 p-3 text-slate-100">
+      {job.error?.message ? <p className="state-danger mt-2 rounded-md border p-2 text-sm">{job.error.message}</p> : null}
+      <ScrollArea className="terminal-panel mt-3 h-[160px] p-3">
         <pre className="whitespace-pre-wrap text-xs">{formatJobLogs(logs)}</pre>
       </ScrollArea>
     </div>

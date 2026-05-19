@@ -1,12 +1,14 @@
 import OpenAI from "openai";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import dns from "node:dns/promises";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { query } from "./db.js";
 import { config } from "./config.js";
-import { ExternalServiceError, NotFoundError, ValidationError } from "./errors.js";
+import { ExternalServiceError, NotFoundError, RateLimitError, ValidationError } from "./errors.js";
 import { resolveCodexBinary } from "./codexBinary.js";
 
 const openai = config.openAiApiKey ? new OpenAI({ apiKey: config.openAiApiKey }) : null;
@@ -197,6 +199,57 @@ function parseWebsiteUrl(rawUrl) {
     repoOwner: parsed.hostname.toLowerCase(),
     repoName: slugify(parsed.pathname === "/" ? "root" : parsed.pathname).slice(0, 80) || "website"
   };
+}
+
+function ipv4Parts(value) {
+  const parts = String(value || "").split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return parts;
+}
+
+export function isPrivateNetworkAddress(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return true;
+  if (text === "localhost" || text.endsWith(".localhost") || text.endsWith(".local")) return true;
+
+  if (net.isIP(text) === 4) {
+    const parts = ipv4Parts(text);
+    if (!parts) return true;
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127 || a >= 224) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true;
+    return false;
+  }
+
+  if (net.isIP(text) === 6) {
+    if (text === "::" || text === "::1") return true;
+    if (text.startsWith("fc") || text.startsWith("fd") || text.startsWith("fe80:")) return true;
+    const mapped = text.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) return isPrivateNetworkAddress(mapped[1]);
+    return false;
+  }
+
+  return false;
+}
+
+export async function assertPublicWebsiteUrl(url) {
+  if (config.mlAllowPrivateNetworkFetches) return true;
+  const parsed = parseWebsiteUrl(url);
+  if (isPrivateNetworkAddress(parsed.hostname)) {
+    throw new ValidationError("Website learning cannot fetch private, local, or internal network addresses");
+  }
+  const addresses = await dns.lookup(parsed.hostname, { all: true, verbatim: false });
+  if (!addresses.length) throw new ValidationError("Website hostname could not be resolved");
+  for (const item of addresses) {
+    if (isPrivateNetworkAddress(item.address)) {
+      throw new ValidationError("Website hostname resolves to a private, local, or internal network address");
+    }
+  }
+  return true;
 }
 
 function parseWebsiteInputs(value) {
@@ -551,6 +604,7 @@ function documentFromSnippet(source, sourceId) {
 }
 
 async function fetchWebsiteBuffer(url, { accept = "text/html,*/*;q=0.8", timeoutMs = config.mlScraperTimeoutMs } = {}) {
+  await assertPublicWebsiteUrl(url);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs));
   try {
@@ -565,6 +619,7 @@ async function fetchWebsiteBuffer(url, { accept = "text/html,*/*;q=0.8", timeout
     if (!response.ok) {
       throw new ValidationError(`Website fetch failed with HTTP ${response.status}`);
     }
+    await assertPublicWebsiteUrl(response.url || url);
     const contentType = response.headers.get("content-type") || "";
     const contentLength = Number(response.headers.get("content-length") || 0);
     if (contentLength > config.mlMaxFileBytes) {
@@ -1324,6 +1379,7 @@ export async function getMlStatus() {
     embeddingModel: config.mlEmbeddingModel,
     skillModel: config.mlSkillModel,
     runtimeSelector: config.mlRuntimeSelector,
+    scope: "global_shared",
     selectorTimeoutMs: config.mlSelectorTimeoutMs,
     cacheTtlMs: config.mlMindCacheTtlMs,
     maxRuntimeSkills: runtimeSkillLimit(),
@@ -1571,6 +1627,17 @@ export async function startLearningJob(sourceId) {
     [sourceId]
   );
   if (existing.rowCount) return getLearningJob(existing.rows[0].id);
+  const limit = Number(config.mlJobMaxActive || 0);
+  if (limit) {
+    const active = await query("SELECT COUNT(*)::int AS count FROM ml_learning_jobs WHERE status IN ('queued','running')");
+    const count = Number(active.rows[0]?.count || 0);
+    if (count >= limit) {
+      throw new RateLimitError("Too many active learning jobs. Wait for one to finish before starting another.", {
+        active: count,
+        limit
+      });
+    }
+  }
 
   const row = await query(
     `INSERT INTO ml_learning_jobs (source_id, status, progress, stage, message)
@@ -2325,6 +2392,16 @@ async function getSkillVersion() {
   return `${MIND_SELECTOR_VERSION}:${version.enabled_count || 0}:${updated}`;
 }
 
+function enabledSkillCountFromVersion(skillVersion) {
+  const parts = String(skillVersion || "").split(":");
+  const count = Number(parts[1] || 0);
+  return Number.isFinite(count) ? count : 0;
+}
+
+function noSkillsWarning() {
+  return "No learned KiraAI skills are available on this server yet. Strict skill mode blocks code and image jobs before any generation engine can run.";
+}
+
 async function loadCachedSkills(promptHash, skillVersion) {
   const cache = await query(
     `SELECT *
@@ -2340,11 +2417,13 @@ async function loadCachedSkills(promptHash, skillVersion) {
     ? cache.rows[0].selected_skill_ids.map(Number).filter(Boolean)
     : [];
   if (!ids.length) {
+    const enabledCount = enabledSkillCountFromVersion(skillVersion);
     return {
       skills: [],
       reason: cache.rows[0].selector_reason || "",
       selectorStrategy: cache.rows[0].selector_strategy || "fast_cached",
-      cacheHit: true
+      cacheHit: true,
+      warning: enabledCount === 0 ? noSkillsWarning() : ""
     };
   }
   const skills = await query(
@@ -2526,7 +2605,7 @@ async function retrieveMind(promptText, options = {}) {
         selectorStrategy: cached.selectorStrategy || "fast_cached",
         cacheHit: true,
         candidateCount: 0,
-        warning: "",
+        warning: cached.warning || "",
         durationMs: Date.now() - startedAt
       };
     }
@@ -2551,6 +2630,21 @@ async function retrieveMind(promptText, options = {}) {
     rowsById.set(Number(skill.id), skill);
   }
   const candidateRows = [...rowsById.values()];
+  if (!candidateRows.length) {
+    const enabledCount = enabledSkillCountFromVersion(skillVersion);
+    return {
+      context: "",
+      skills: [],
+      chunks: [],
+      candidates: [],
+      selectorReason: enabledCount === 0 ? "The shared server skill library is empty." : "No enabled skills with embeddings matched this prompt.",
+      selectorStrategy: options.deep ? "codex" : "fast_cached",
+      cacheHit: false,
+      candidateCount: 0,
+      warning: enabledCount === 0 ? noSkillsWarning() : "No matching learned KiraAI skills were available for this prompt.",
+      durationMs: Date.now() - startedAt
+    };
+  }
   const selected = await selectSkillsForPrompt(promptText, candidateRows, { deep: Boolean(options.deep) });
   const selectedSkills = selected.skills.map(serializeRetrievedSkill);
   const selectorStrategy = selected.selectorStrategy || (options.deep ? "codex" : "fast_cached");

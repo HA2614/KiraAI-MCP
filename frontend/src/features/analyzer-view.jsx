@@ -84,7 +84,7 @@ export function AnalyzerView({ projects, selectedProjectId, setSelectedProjectId
               </div>
               <Badge
                 variant={jobStatus === "done" ? "secondary" : "outline"}
-                className={jobStatus === "failed" ? "border-red-200 bg-red-50 text-red-700" : ""}
+                className={jobStatus === "failed" ? "border-red-500/30 bg-red-500/10 text-red-200" : ""}
               >
                 {jobStatus}
               </Badge>
@@ -100,18 +100,18 @@ export function AnalyzerView({ projects, selectedProjectId, setSelectedProjectId
               {analysisJob?.message || (selectedProject ? "Start KiraAI Analyzer to stream output here." : "Select a project to enable analysis.")}
             </p>
             {analysisJob?.error ? (
-              <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+              <div className="state-danger rounded-md border p-3 text-sm">
                 <div className="font-medium">{analysisJob.error.message || "KiraAI analysis failed"}</div>
                 {analysisJob.error.code ? <div className="text-xs opacity-80">{analysisJob.error.code}</div> : null}
               </div>
             ) : null}
-            <div className="rounded-lg border border-slate-800 bg-slate-950">
-              <div className="flex items-center justify-between border-b border-slate-800 px-3 py-2 text-xs text-slate-300">
+            <div className="terminal-panel">
+              <div className="flex items-center justify-between border-b border-border/70 px-3 py-2 text-xs text-muted-foreground">
                 <span>Live KiraAI Terminal</span>
                 <span>{terminalText ? `${terminalText.split("\n").length} lines` : "idle"}</span>
               </div>
               <ScrollArea className="h-[260px] p-3">
-                <pre className="whitespace-pre-wrap font-mono text-[12px] leading-relaxed text-slate-100">
+                <pre className="whitespace-pre-wrap font-mono text-[12px] leading-relaxed text-neutral-100">
                   {terminalText || "Terminal idle. Run KiraAI Analyzer to see real-time progress logs."}
                 </pre>
               </ScrollArea>

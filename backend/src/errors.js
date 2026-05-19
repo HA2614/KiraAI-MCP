@@ -22,6 +22,24 @@ export class NotFoundError extends AppError {
   }
 }
 
+export class UnauthorizedError extends AppError {
+  constructor(message = "Authentication required", code = "AUTH_REQUIRED") {
+    super(message, { statusCode: 401, code, name: "UnauthorizedError" });
+  }
+}
+
+export class ForbiddenError extends AppError {
+  constructor(message = "Forbidden", code = "FORBIDDEN", details = null) {
+    super(message, { statusCode: 403, code, details, name: "ForbiddenError" });
+  }
+}
+
+export class RateLimitError extends AppError {
+  constructor(message = "Too many requests", details = null) {
+    super(message, { statusCode: 429, code: "RATE_LIMITED", details, name: "RateLimitError" });
+  }
+}
+
 export class ExternalServiceError extends AppError {
   constructor(message, details = null, code = "EXTERNAL_SERVICE_ERROR") {
     super(message, { statusCode: 502, code, details, name: "ExternalServiceError" });

@@ -1,6 +1,4 @@
 import express from "express";
-import { mkdir, stat } from "node:fs/promises";
-import path from "node:path";
 import { z } from "zod";
 import { query } from "./db.js";
 import { redis } from "./cache.js";
@@ -22,7 +20,6 @@ import {
   fsWriteFile,
   listDirectories,
   readTextFile,
-  resolveSafePath,
   writeTextFile
 } from "./structure.js";
 import { registerFsEventStream } from "./fsEvents.js";
@@ -72,6 +69,26 @@ import {
 } from "./mlMind.js";
 import { fail, ok } from "./response.js";
 import { NotFoundError, ValidationError } from "./errors.js";
+import { hashPassword, createSessionForUser } from "./auth.js";
+import {
+  acceptInviteToken,
+  assertCodeJobAccess,
+  assertUserPathAccess,
+  createProjectInvite,
+  createProjectRecordForUser,
+  createWorkspaceProjectForUser,
+  deleteProjectForUser,
+  ensureProjectMembership,
+  getInviteByToken,
+  getProjectByPlanForUser,
+  getProjectForUser,
+  listProjectMembersAndInvites,
+  listProjectsForUser,
+  publicUser,
+  removeProjectMember,
+  revokeProjectInvite,
+  updateProjectForUser
+} from "./accessControl.js";
 
 const projectSchema = z.object({
   name: z.string().min(2),
@@ -170,6 +187,13 @@ const codeStructureJobSchema = z.object({
   preset: z.enum(["full_stack"]).optional().default("full_stack"),
   instructions: z.string().optional().default("")
 });
+const inviteSchema = z.object({
+  email: z.string().email()
+});
+const inviteAcceptSchema = z.object({
+  password: z.string().optional().default(""),
+  displayName: z.string().optional().default("")
+});
 const mlSourceSchema = z.object({
   url: z.string().min(1)
 });
@@ -223,48 +247,21 @@ function parsePerformanceRunType(value) {
 }
 
 function normalizeError(error) {
-  if (error?.statusCode) return error;
+  if (error?.statusCode) {
+    const exposed = error.expose ?? error.statusCode < 500;
+    return {
+      statusCode: error.statusCode,
+      code: error.code || "INTERNAL_ERROR",
+      message: exposed ? error.message : "Internal server error",
+      details: exposed ? error.details || null : null
+    };
+  }
   return {
     statusCode: 500,
     code: "INTERNAL_ERROR",
-    message: error?.message || "Unknown error",
+    message: "Internal server error",
     details: null
   };
-}
-
-function normalizeProjectRoot(rootPath) {
-  const value = String(rootPath || "").trim();
-  return value ? resolveSafePath(value) : "";
-}
-
-function projectFolderSlug(value) {
-  return String(value || "project")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 70) || "project";
-}
-
-async function pathExists(targetPath) {
-  try {
-    await stat(targetPath);
-    return true;
-  } catch (error) {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  }
-}
-
-async function nextAvailableProjectFolder(basePath, projectName) {
-  const parent = normalizeProjectRoot(basePath || config.fsBasePath);
-  const slug = projectFolderSlug(projectName);
-  for (let index = 0; index < 1000; index += 1) {
-    const suffix = index === 0 ? "" : `-${index + 1}`;
-    const candidate = normalizeProjectRoot(path.join(parent, `${slug}${suffix}`));
-    if (!(await pathExists(candidate))) return { parent, rootPath: candidate };
-  }
-  throw new ValidationError("Could not find an available project folder name");
 }
 
 function importedProjectPayload(rootPath) {
@@ -278,6 +275,17 @@ function importedProjectPayload(rootPath) {
     budget: "N/A",
     rootPath
   };
+}
+
+function appOrigin(req) {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const proto = forwardedProto || req.protocol || "http";
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
+  return `${proto}://${host}`;
+}
+
+function inviteLink(req, token) {
+  return `${appOrigin(req)}/invite/${encodeURIComponent(token)}`;
 }
 
 async function routeGuard(res, fn) {
@@ -444,50 +452,14 @@ router.post("/projects", async (req, res) =>
     const parsed = projectSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid project payload", parsed.error.flatten());
 
-    const { name, goals, techStack, timeline, budget, rootPath } = parsed.data;
-    const safeRootPath = normalizeProjectRoot(rootPath);
-    const result = await query(
-      `INSERT INTO projects (name, goals, tech_stack, timeline, budget, root_path)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       RETURNING *`,
-      [name, goals, techStack, timeline, budget, safeRootPath]
-    );
-    return ok(res, result.rows[0], null, 201);
+    const project = await createProjectRecordForUser(req.auth?.user, parsed.data);
+    return ok(res, project, null, 201);
   })
 );
 
-router.get("/projects", async (_req, res) =>
+router.get("/projects", async (req, res) =>
   routeGuard(res, async () => {
-    const result = await query(
-      `SELECT p.*,
-              latest.id AS source_summary_id,
-              latest.analysis_version AS source_analysis_version,
-              latest.created_at AS source_analysis_created_at,
-              latest.duration_ms AS source_analysis_duration_ms,
-              latest.model AS source_analysis_model,
-              latest_code.id AS latest_code_job_id,
-              latest_code.status AS latest_code_job_status,
-              latest_code.duration_ms AS latest_code_job_duration_ms,
-              latest_code.created_at AS latest_code_job_created_at,
-              latest_code.model AS latest_code_job_model
-       FROM projects p
-       LEFT JOIN LATERAL (
-         SELECT id, analysis_version, created_at, duration_ms, model
-         FROM codebase_summaries s
-         WHERE s.project_id = p.id OR (p.root_path <> '' AND s.root_path = p.root_path)
-         ORDER BY created_at DESC
-         LIMIT 1
-       ) latest ON TRUE
-       LEFT JOIN LATERAL (
-         SELECT id, status, duration_ms, created_at, model
-         FROM code_jobs c
-         WHERE c.project_id = p.id OR (p.root_path <> '' AND c.root_path = p.root_path)
-         ORDER BY created_at DESC
-         LIMIT 1
-       ) latest_code ON TRUE
-       ORDER BY p.created_at DESC`
-    );
-    return ok(res, result.rows);
+    return ok(res, await listProjectsForUser(req.auth?.user));
   })
 );
 
@@ -495,28 +467,33 @@ router.post("/projects/import", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = importProjectSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid import payload", parsed.error.flatten());
-    const safeRootPath = normalizeProjectRoot(parsed.data.targetPath);
+    const safeRootPath = await assertUserPathAccess(req.auth?.user, parsed.data.targetPath, { write: false });
     const payload = importedProjectPayload(safeRootPath);
     const existing = await query("SELECT * FROM projects WHERE root_path=$1 LIMIT 1", [safeRootPath]);
 
     if (existing.rowCount) {
+      await getProjectForUser(existing.rows[0].id, req.auth?.user, { roles: ["owner"] });
       const updated = await query(
         `UPDATE projects
-         SET name=$1, goals=$2, tech_stack=$3, timeline=$4, budget=$5, root_path=$6, updated_at=NOW()
+         SET name=$1, goals=$2, tech_stack=$3, timeline=$4, budget=$5, root_path=$6,
+             owner_user_id=COALESCE(owner_user_id, $8),
+             created_by_user_id=COALESCE(created_by_user_id, $8),
+             updated_at=NOW()
          WHERE id=$7
          RETURNING *`,
-        [payload.name, payload.goals, payload.techStack, payload.timeline, payload.budget, safeRootPath, existing.rows[0].id]
+        [payload.name, payload.goals, payload.techStack, payload.timeline, payload.budget, safeRootPath, existing.rows[0].id, req.auth?.user?.id || null]
       );
       await redis.del(`project:${existing.rows[0].id}`).catch(() => null);
       return ok(res, { project: updated.rows[0], created: false, updated: true });
     }
 
     const created = await query(
-      `INSERT INTO projects (name, goals, tech_stack, timeline, budget, root_path)
-       VALUES ($1,$2,$3,$4,$5,$6)
+      `INSERT INTO projects (name, goals, tech_stack, timeline, budget, root_path, owner_user_id, created_by_user_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$7)
        RETURNING *`,
-      [payload.name, payload.goals, payload.techStack, payload.timeline, payload.budget, safeRootPath]
+      [payload.name, payload.goals, payload.techStack, payload.timeline, payload.budget, safeRootPath, req.auth?.user?.id || null]
     );
+    await ensureProjectMembership(created.rows[0].id, req.auth?.user?.id, "owner");
     return ok(res, { project: created.rows[0], created: true, updated: false }, null, 201);
   })
 );
@@ -526,73 +503,21 @@ router.post("/projects/create-folder", async (req, res) =>
     const parsed = createProjectFolderSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid project folder payload", parsed.error.flatten());
 
-    const { name, basePath, goals, techStack, timeline, budget } = parsed.data;
-    const folder = await nextAvailableProjectFolder(basePath, name);
-    await mkdir(folder.rootPath, { recursive: false });
-
-    const projectGoals = goals.trim() || `Workspace project created in ${folder.rootPath}. Use KiraAI Analyzer or Code Worker to build from this folder.`;
-    const result = await query(
-      `INSERT INTO projects (name, goals, tech_stack, timeline, budget, root_path)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       RETURNING *`,
-      [
-        name.trim(),
-        projectGoals,
-        techStack.trim() || "Pending project setup",
-        timeline.trim() || "New workspace project",
-        budget.trim() || "N/A",
-        folder.rootPath
-      ]
-    );
-    return ok(res, { project: result.rows[0], rootPath: folder.rootPath, parent: folder.parent, created: true }, null, 201);
+    const result = await createWorkspaceProjectForUser(req.auth?.user, parsed.data);
+    return ok(res, result, null, 201);
   })
 );
 
 router.get("/projects/:id", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
-    const cacheKey = `project:${id}`;
-    const cached = await redis.get(cacheKey).catch(() => null);
-    if (cached) return ok(res, JSON.parse(cached), { source: "cache" });
-
-    const project = await query(
-      `SELECT p.*,
-              latest.id AS source_summary_id,
-              latest.analysis_version AS source_analysis_version,
-              latest.created_at AS source_analysis_created_at,
-              latest.duration_ms AS source_analysis_duration_ms,
-              latest.model AS source_analysis_model,
-              latest_code.id AS latest_code_job_id,
-              latest_code.status AS latest_code_job_status,
-              latest_code.duration_ms AS latest_code_job_duration_ms,
-              latest_code.created_at AS latest_code_job_created_at,
-              latest_code.model AS latest_code_job_model
-       FROM projects p
-       LEFT JOIN LATERAL (
-         SELECT id, analysis_version, created_at, duration_ms, model
-         FROM codebase_summaries s
-         WHERE s.project_id = p.id OR (p.root_path <> '' AND s.root_path = p.root_path)
-         ORDER BY created_at DESC
-         LIMIT 1
-       ) latest ON TRUE
-       LEFT JOIN LATERAL (
-         SELECT id, status, duration_ms, created_at, model
-         FROM code_jobs c
-         WHERE c.project_id = p.id OR (p.root_path <> '' AND c.root_path = p.root_path)
-         ORDER BY created_at DESC
-         LIMIT 1
-       ) latest_code ON TRUE
-       WHERE p.id=$1`,
-      [id]
-    );
-    if (!project.rowCount) throw new NotFoundError("Project not found");
+    const project = await getProjectForUser(id, req.auth?.user);
 
     const plans = await query(
       "SELECT * FROM project_plans WHERE project_id=$1 ORDER BY version DESC",
       [id]
     );
-    const payload = { ...project.rows[0], plans: plans.rows };
-    await redis.set(cacheKey, JSON.stringify(payload), "EX", 120).catch(() => null);
+    const payload = { ...project, plans: plans.rows };
     return ok(res, payload, { source: "db" });
   })
 );
@@ -602,9 +527,8 @@ router.get("/projects/:id/performance-runs", async (req, res) =>
     const id = parseIntParam(req.params.id, "id");
     const type = parsePerformanceRunType(req.query.type);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 30)));
-    const projectResult = await query("SELECT * FROM projects WHERE id=$1", [id]);
-    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
-    const rootPath = projectResult.rows[0].root_path || "";
+    const project = await getProjectForUser(id, req.auth?.user);
+    const rootPath = project.root_path || "";
 
     const rows = await query(
       `SELECT *
@@ -657,8 +581,7 @@ router.get("/projects/:id/code-jobs", async (req, res) =>
     const id = parseIntParam(req.params.id, "id");
     const parsed = codeJobHistoryQuerySchema.safeParse(req.query);
     if (!parsed.success) throw new ValidationError("Invalid code job history query", parsed.error.flatten());
-    const projectResult = await query("SELECT id FROM projects WHERE id=$1", [id]);
-    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
+    await getProjectForUser(id, req.auth?.user);
     const items = await listProjectCodeJobs(id, parsed.data);
     return ok(res, items, { projectId: id, ...parsed.data });
   })
@@ -669,6 +592,7 @@ router.post("/projects/:id/code-structure-jobs", async (req, res) =>
     const id = parseIntParam(req.params.id, "id");
     const parsed = codeStructureJobSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid code structure job payload", parsed.error.flatten());
+    await getProjectForUser(id, req.auth?.user);
     return ok(res, await startStructureCodeJob({ projectId: id, ...parsed.data }), null, 201);
   })
 );
@@ -679,27 +603,94 @@ router.put("/projects/:id", async (req, res) =>
     const parsed = projectSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid project payload", parsed.error.flatten());
 
-    const { name, goals, techStack, timeline, budget, rootPath } = parsed.data;
-    const safeRootPath = normalizeProjectRoot(rootPath);
-    const result = await query(
-      `UPDATE projects
-       SET name=$1, goals=$2, tech_stack=$3, timeline=$4, budget=$5, root_path=$6, updated_at=NOW()
-       WHERE id=$7
-       RETURNING *`,
-      [name, goals, techStack, timeline, budget, safeRootPath, id]
-    );
-    if (!result.rowCount) throw new NotFoundError("Project not found");
+    const result = await updateProjectForUser(id, req.auth?.user, parsed.data);
     await redis.del(`project:${id}`).catch(() => null);
-    return ok(res, result.rows[0]);
+    return ok(res, result);
   })
 );
 
 router.delete("/projects/:id", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
-    await query("DELETE FROM projects WHERE id=$1", [id]);
+    const deleted = await deleteProjectForUser(id, req.auth?.user);
     await redis.del(`project:${id}`).catch(() => null);
-    return ok(res, { deleted: true, id });
+    return ok(res, deleted);
+  })
+);
+
+router.post("/projects/:id/invites", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const parsed = inviteSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid invite payload", parsed.error.flatten());
+    const invite = await createProjectInvite(id, parsed.data.email, req.auth?.user);
+    return ok(res, {
+      id: invite.id,
+      projectId: invite.project_id,
+      email: invite.email,
+      role: invite.role,
+      status: invite.status,
+      expiresAt: invite.expires_at,
+      inviteLink: inviteLink(req, invite.token)
+    }, null, 201);
+  })
+);
+
+router.get("/projects/:id/members", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    return ok(res, await listProjectMembersAndInvites(id, req.auth?.user));
+  })
+);
+
+router.delete("/projects/:id/members/:userId", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const userId = parseIntParam(req.params.userId, "userId");
+    return ok(res, await removeProjectMember(id, userId, req.auth?.user));
+  })
+);
+
+router.post("/projects/:id/invites/:inviteId/revoke", async (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    const inviteId = parseIntParam(req.params.inviteId, "inviteId");
+    return ok(res, await revokeProjectInvite(id, inviteId, req.auth?.user));
+  })
+);
+
+router.get("/invites/:token", async (req, res) =>
+  routeGuard(res, async () => {
+    const invite = await getInviteByToken(req.params.token);
+    return ok(res, {
+      id: invite.id,
+      projectId: invite.project_id,
+      projectName: invite.project_name,
+      email: invite.email,
+      role: invite.role,
+      status: invite.status,
+      expiresAt: invite.expires_at,
+      expired: Boolean(invite.expired)
+    });
+  })
+);
+
+router.post("/invites/:token/accept", async (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = inviteAcceptSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid invite accept payload", parsed.error.flatten());
+    const passwordHash = parsed.data.password ? await hashPassword(parsed.data.password) : "";
+    const result = await acceptInviteToken(req.params.token, {
+      currentUser: req.auth?.authenticated ? req.auth.user : null,
+      passwordHash,
+      displayName: parsed.data.displayName
+    });
+    await createSessionForUser(req, res, result.user);
+    return ok(res, {
+      user: publicUser(result.user),
+      project: result.project,
+      membership: result.membership
+    });
   })
 );
 
@@ -708,9 +699,8 @@ router.get("/projects/:id/analysis-summaries", async (req, res) =>
     const id = parseIntParam(req.params.id, "id");
     const limit = Number(req.query.limit || 40);
     const offset = Number(req.query.offset || 0);
-    const projectResult = await query("SELECT * FROM projects WHERE id=$1", [id]);
-    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
-    const items = await listProjectCodebaseSummaries(projectResult.rows[0], limit, offset);
+    const project = await getProjectForUser(id, req.auth?.user);
+    const items = await listProjectCodebaseSummaries(project, limit, offset);
     return ok(res, items, { limit, offset, projectId: id });
   })
 );
@@ -718,9 +708,7 @@ router.get("/projects/:id/analysis-summaries", async (req, res) =>
 router.post("/projects/:id/generate-plan", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
-    const projectResult = await query("SELECT * FROM projects WHERE id=$1", [id]);
-    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
-    const project = projectResult.rows[0];
+    const project = await getProjectForUser(id, req.auth?.user);
 
     const latest = await query(
       "SELECT COALESCE(MAX(version), 0) AS version FROM project_plans WHERE project_id=$1",
@@ -745,6 +733,7 @@ router.post("/projects/:id/generate-plan", async (req, res) =>
 router.get("/projects/:id/plans", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
+    await getProjectForUser(id, req.auth?.user);
     const limit = Number(req.query.limit || 20);
     const offset = Number(req.query.offset || 0);
     const status = String(req.query.status || "").trim();
@@ -777,6 +766,7 @@ router.get("/projects/:id/plans", async (req, res) =>
 router.get("/projects/:id/plans/compare", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
+    await getProjectForUser(id, req.auth?.user);
     const againstVersion = Number(req.query.againstVersion || 0);
     if (!againstVersion) throw new ValidationError("againstVersion query parameter is required");
 
@@ -818,6 +808,7 @@ router.get("/projects/:id/plans/compare", async (req, res) =>
 router.post("/plans/:planId/promote-baseline", async (req, res) =>
   routeGuard(res, async () => {
     const planId = parseIntParam(req.params.planId, "planId");
+    await getProjectByPlanForUser(planId, req.auth?.user);
     const planResult = await query("SELECT * FROM project_plans WHERE id=$1", [planId]);
     if (!planResult.rowCount) throw new NotFoundError("Plan not found");
     const plan = planResult.rows[0];
@@ -835,6 +826,7 @@ router.post("/plans/:planId/promote-baseline", async (req, res) =>
 router.post("/plans/:planId/feedback", async (req, res) =>
   routeGuard(res, async () => {
     const planId = parseIntParam(req.params.planId, "planId");
+    await getProjectByPlanForUser(planId, req.auth?.user);
     const parsed = feedbackSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid feedback payload", parsed.error.flatten());
 
@@ -882,9 +874,8 @@ router.post("/projects/:id/generate-structure", async (req, res) =>
     const parsed = structureSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid structure options", parsed.error.flatten());
 
-    const projectResult = await query("SELECT * FROM projects WHERE id=$1", [id]);
-    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
-    const project = projectResult.rows[0];
+    const project = await getProjectForUser(id, req.auth?.user);
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath, { write: true });
 
     const planResult = await query(
       "SELECT * FROM project_plans WHERE project_id=$1 ORDER BY version DESC LIMIT 1",
@@ -913,17 +904,25 @@ router.post("/fs/list-directories", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = pathSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid path payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath);
     const data = await listDirectories(parsed.data.targetPath);
     return ok(res, data);
   })
 );
 
-router.get("/fs/events", (req, res) => registerFsEventStream(req, res));
+router.get("/fs/events", (req, res) =>
+  routeGuard(res, async () => {
+    const root = String(req.query.root || "").trim() || config.fsBasePath;
+    await assertUserPathAccess(req.auth?.user, root);
+    return registerFsEventStream(req, res);
+  })
+);
 
 router.post("/fs/list", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = fsListSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs list payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath);
     return ok(res, await fsList(parsed.data));
   })
 );
@@ -932,6 +931,7 @@ router.post("/fs/tree", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = fsTreeSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs tree payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath);
     return ok(res, await fsTree(parsed.data));
   })
 );
@@ -940,6 +940,7 @@ router.post("/fs/stat", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = pathSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs stat payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath);
     return ok(res, await fsStat(parsed.data));
   })
 );
@@ -948,6 +949,7 @@ router.post("/fs/mkdir", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = pathSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs mkdir payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath, { write: true });
     return ok(res, await fsMkdir(parsed.data));
   })
 );
@@ -956,6 +958,7 @@ router.post("/fs/create-file", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = fsCreateFileSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs create-file payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath, { write: true });
     return ok(res, await fsCreateFile(parsed.data));
   })
 );
@@ -964,6 +967,7 @@ router.post("/fs/rename", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = fsRenameSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs rename payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.sourcePath, { write: true });
     return ok(res, await fsRename(parsed.data));
   })
 );
@@ -972,6 +976,8 @@ router.post("/fs/move", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = fsMoveCopySchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs move payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.sourcePath, { write: true });
+    await assertUserPathAccess(req.auth?.user, parsed.data.destinationPath, { write: true });
     return ok(res, await fsMove(parsed.data));
   })
 );
@@ -980,6 +986,8 @@ router.post("/fs/copy", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = fsMoveCopySchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs copy payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.sourcePath);
+    await assertUserPathAccess(req.auth?.user, parsed.data.destinationPath, { write: true });
     return ok(res, await fsCopy(parsed.data));
   })
 );
@@ -988,6 +996,7 @@ router.post("/fs/delete", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = pathSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs delete payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath, { write: true });
     return ok(res, await fsDelete(parsed.data));
   })
 );
@@ -996,6 +1005,19 @@ router.post("/fs/batch", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = fsBatchSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs batch payload", parsed.error.flatten());
+    for (const op of parsed.data.operations || []) {
+      if (op.type === "delete") await assertUserPathAccess(req.auth?.user, op.targetPath, { write: true });
+      if (op.type === "copy") {
+        await assertUserPathAccess(req.auth?.user, op.sourcePath);
+        await assertUserPathAccess(req.auth?.user, op.destinationPath, { write: true });
+      }
+      if (op.type === "move") {
+        await assertUserPathAccess(req.auth?.user, op.sourcePath, { write: true });
+        await assertUserPathAccess(req.auth?.user, op.destinationPath, { write: true });
+      }
+      if (op.type === "rename") await assertUserPathAccess(req.auth?.user, op.sourcePath, { write: true });
+      if (op.type === "mkdir" || op.type === "create-file") await assertUserPathAccess(req.auth?.user, op.targetPath, { write: true });
+    }
     return ok(res, await fsBatch(parsed.data));
   })
 );
@@ -1004,6 +1026,7 @@ router.post("/fs/read-file", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = pathSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid path payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath);
     const data = await readTextFile(parsed.data.targetPath);
     return ok(res, data);
   })
@@ -1013,6 +1036,7 @@ router.post("/fs/write-file", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = writeFileSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid write payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath, { write: true });
     const data = await writeTextFile(parsed.data.targetPath, parsed.data.content);
     return ok(res, data);
   })
@@ -1022,6 +1046,7 @@ router.post("/analysis/summarize-codebase", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = summarizeSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid summarize payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath);
     const data = await summarizeCodebaseWithCodex(parsed.data.targetPath);
     const saved = await saveCodebaseSummary(data);
     return ok(res, { ...data, summaryId: saved.id, analysisVersion: saved.analysisVersion, projectId: saved.projectId });
@@ -1032,6 +1057,7 @@ router.post("/fs/read", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = pathSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs read payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath);
     return ok(res, await fsReadFile(parsed.data));
   })
 );
@@ -1040,6 +1066,7 @@ router.post("/fs/write", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = fsWriteSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid fs write payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath, { write: true });
     return ok(res, await fsWriteFile(parsed.data));
   })
 );
@@ -1048,6 +1075,7 @@ router.post("/analysis/summarize-codebase/start", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = summarizeSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid summarize payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath);
     const job = startCodebaseSummaryJob(parsed.data.targetPath);
     return ok(res, {
       jobId: job.jobId,
@@ -1065,6 +1093,8 @@ router.get("/analysis/summarize-codebase/jobs/:jobId", async (req, res) =>
     if (!jobId) throw new ValidationError("jobId is required");
     const job = getCodebaseSummaryJob(jobId);
     if (!job) throw new NotFoundError("Analysis job not found");
+    if (job.projectId) await getProjectForUser(job.projectId, req.auth?.user);
+    else if (job.targetPath) await assertUserPathAccess(req.auth?.user, job.targetPath);
     return ok(res, job);
   })
 );
@@ -1072,10 +1102,9 @@ router.get("/analysis/summarize-codebase/jobs/:jobId", async (req, res) =>
 router.post("/projects/:id/analyze-codebase/start", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
-    const projectResult = await query("SELECT * FROM projects WHERE id=$1", [id]);
-    if (!projectResult.rowCount) throw new NotFoundError("Project not found");
-    const project = projectResult.rows[0];
+    const project = await getProjectForUser(id, req.auth?.user);
     if (!project.root_path?.trim()) throw new ValidationError("Project does not have a root path. Import a folder first.");
+    await assertUserPathAccess(req.auth?.user, project.root_path);
     await redis.del(`project:${id}`).catch(() => null);
     const job = startCodebaseSummaryJob(project.root_path, { projectId: project.id });
     return ok(res, {
@@ -1094,7 +1123,17 @@ router.get("/analysis/summaries", async (req, res) =>
     const limit = Number(req.query.limit || 20);
     const offset = Number(req.query.offset || 0);
     const items = await listCodebaseSummaries(limit, offset);
-    return ok(res, items, { limit, offset });
+    const filtered = [];
+    for (const item of items) {
+      try {
+        if (item.project_id) await getProjectForUser(item.project_id, req.auth?.user);
+        else await assertUserPathAccess(req.auth?.user, item.root_path);
+        filtered.push(item);
+      } catch {
+        // Hide summaries outside the current user's projects.
+      }
+    }
+    return ok(res, filtered, { limit, offset });
   })
 );
 
@@ -1103,6 +1142,8 @@ router.get("/analysis/summaries/:id", async (req, res) =>
     const id = parseIntParam(req.params.id, "id");
     const item = await getCodebaseSummaryById(id);
     if (!item) throw new NotFoundError("Summary not found");
+    if (item.project_id) await getProjectForUser(item.project_id, req.auth?.user);
+    else await assertUserPathAccess(req.auth?.user, item.root_path);
     return ok(res, item);
   })
 );
@@ -1110,8 +1151,13 @@ router.get("/analysis/summaries/:id", async (req, res) =>
 router.post("/analysis/summaries/:id/add-as-project", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
+    const summary = await getCodebaseSummaryById(id);
+    if (!summary) throw new NotFoundError("Summary not found");
+    if (summary.project_id) await getProjectForUser(summary.project_id, req.auth?.user);
+    else await assertUserPathAccess(req.auth?.user, summary.root_path);
     const result = await addSummaryAsProject(id);
     if (!result) throw new NotFoundError("Summary not found");
+    await ensureProjectMembership(result.project.id, req.auth?.user?.id, "owner");
     await redis.del(`project:${result.project.id}`).catch(() => null);
     return ok(res, result);
   })
@@ -1121,7 +1167,17 @@ router.post("/code-jobs", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = codeJobSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid code job payload", parsed.error.flatten());
-    return ok(res, await startCodeJob(parsed.data), null, 201);
+    if (parsed.data.projectId) {
+      await getProjectForUser(parsed.data.projectId, req.auth?.user);
+    } else {
+      await assertUserPathAccess(req.auth?.user, parsed.data.rootPath);
+    }
+    return ok(res, await startCodeJob({
+      ...parsed.data,
+      requestMetadata: {
+        startedByUserId: req.auth?.user?.id || null
+      }
+    }), null, 201);
   })
 );
 
@@ -1130,7 +1186,7 @@ router.get("/code-jobs", async (req, res) =>
     const parsed = codeJobHistoryQuerySchema.safeParse(req.query);
     if (!parsed.success) throw new ValidationError("Invalid code job history query", parsed.error.flatten());
     const { limit, offset, status, type } = parsed.data;
-    return ok(res, await listCodeJobs(limit, offset, { status, type }), { limit, offset, status, type });
+    return ok(res, await listCodeJobs(limit, offset, { status, type, userId: req.auth?.user?.id || null }), { limit, offset, status, type });
   })
 );
 
@@ -1138,6 +1194,7 @@ router.get("/code-jobs/:id/assets/:assetId", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
     const assetId = parseIntParam(req.params.assetId, "assetId");
+    await assertCodeJobAccess(id, req.auth?.user);
     const asset = await getCodeJobAsset(id, assetId);
     const filename = String(asset.filename || "kiraai-asset").replace(/["\r\n]/g, "");
     res.setHeader("Content-Type", asset.mime_type || "application/octet-stream");
@@ -1149,15 +1206,23 @@ router.get("/code-jobs/:id/assets/:assetId", async (req, res) =>
 router.get("/code-jobs/:id", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
+    await assertCodeJobAccess(id, req.auth?.user);
     return ok(res, await getCodeJob(id));
   })
 );
 
-router.get("/code-jobs/:id/events", (req, res) => registerCodeJobEvents(req, res));
+router.get("/code-jobs/:id/events", (req, res) =>
+  routeGuard(res, async () => {
+    const id = parseIntParam(req.params.id, "id");
+    await assertCodeJobAccess(id, req.auth?.user);
+    return registerCodeJobEvents(req, res);
+  })
+);
 
 router.post("/code-jobs/:id/apply", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
+    await assertCodeJobAccess(id, req.auth?.user);
     return ok(res, await applyCodeJob(id));
   })
 );
@@ -1165,6 +1230,7 @@ router.post("/code-jobs/:id/apply", async (req, res) =>
 router.post("/code-jobs/:id/reject", async (req, res) =>
   routeGuard(res, async () => {
     const id = parseIntParam(req.params.id, "id");
+    await assertCodeJobAccess(id, req.auth?.user);
     return ok(res, await rejectCodeJob(id));
   })
 );
@@ -1173,6 +1239,7 @@ router.get("/analysis/learning-profile", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = rootQuerySchema.safeParse(req.query);
     if (!parsed.success || !parsed.data.rootPath) throw new ValidationError("rootPath query parameter is required");
+    await assertUserPathAccess(req.auth?.user, parsed.data.rootPath);
     return ok(res, await getLearningProfile(parsed.data.rootPath));
   })
 );
@@ -1182,6 +1249,7 @@ router.get("/analysis/improvements", async (req, res) =>
     const rootPath = String(req.query.rootPath || "").trim();
     const limit = Number(req.query.limit || 100);
     const offset = Number(req.query.offset || 0);
+    if (rootPath) await assertUserPathAccess(req.auth?.user, rootPath);
     return ok(res, await listImprovementSuggestions(rootPath, limit, offset), { limit, offset });
   })
 );
@@ -1190,6 +1258,7 @@ router.post("/analysis/check-improvements", async (req, res) =>
   routeGuard(res, async () => {
     const parsed = summarizeSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid improvement check payload", parsed.error.flatten());
+    await assertUserPathAccess(req.auth?.user, parsed.data.targetPath);
     const data = await summarizeCodebaseWithCodex(parsed.data.targetPath);
     const saved = await saveCodebaseSummary(data);
     return ok(res, { ...data, summaryId: saved.id, analysisVersion: saved.analysisVersion, projectId: saved.projectId, improvementChecks: saved.improvementChecks || [] });

@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { query } from "./db.js";
 import { config } from "./config.js";
-import { ExternalServiceError, NotFoundError, ValidationError } from "./errors.js";
+import { AppError, ExternalServiceError, NotFoundError, RateLimitError, ValidationError } from "./errors.js";
 import { getLearningProfile } from "./analysisStore.js";
 import { buildMindContextForPrompt } from "./mlMind.js";
 import { resolveCodexBinary } from "./codexBinary.js";
-import { fsDelete, fsWriteFile, resolveSafePath } from "./structure.js";
+import { fsDelete, fsWriteFile, resolveExistingSafePath, resolveSafePath } from "./structure.js";
 import { createRunTimer, finishTimingSnapshot } from "./performanceTiming.js";
 import { generateImageAsset, normalizeSvgAssetContent, resolveImageProvider, shouldGenerateImage } from "./imageGeneration.js";
 
@@ -363,11 +363,12 @@ async function resolveCodeJobRoot({ projectId, rootPath }) {
     if (!project.root_path?.trim()) {
       throw new ValidationError("Selected project does not have a workspace root path");
     }
-    return { projectId: project.id, safeRoot: resolveSafePath(project.root_path) };
+    return { projectId: project.id, projectName: project.name || "Selected project", safeRoot: await resolveExistingSafePath(project.root_path) };
   }
 
   if (!rootPath?.trim()) throw new ValidationError("rootPath is required when projectId is not provided");
-  return { projectId: null, safeRoot: resolveSafePath(rootPath) };
+  const safeRoot = await resolveExistingSafePath(rootPath);
+  return { projectId: null, projectName: path.basename(safeRoot) || "Selected project", safeRoot };
 }
 
 function buildFullStackStructurePrompt({ projectName = "Selected project", instructions = "" } = {}) {
@@ -396,6 +397,34 @@ function buildFullStackStructurePrompt({ projectName = "Selected project", instr
     "- Prefer simple, readable JavaScript and SQL over heavy frameworks.",
     extra ? `\nAdditional user instructions:\n${extra}` : ""
   ].filter(Boolean).join("\n");
+}
+
+export function shouldUseStructureWorkflow(prompt = "") {
+  const text = String(prompt || "")
+    .toLowerCase()
+    .replace(/[-_/]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return false;
+  const hasAction = /\b(create|make|build|generate|setup|set up|maak|bouw|genereer|zet|opzetten)\b/.test(text);
+  const hasScaffoldIntent = /\b(full stack|fullstack|scaffold|scaffolding|setup full stack|setup project|starter project|boilerplate)\b/.test(text);
+  const hasStructurePhrase = /\b(project structure|folder structure|project folder structure|app structure)\b/.test(text);
+  const hasStackBreadth = /\bfrontend\b/.test(text) &&
+    /\bbackend\b/.test(text) &&
+    /\b(api|route|routes|database|db|sql|schema|docker|compose|env|readme)\b/.test(text);
+  const hasReviewableBaseline = /\b(create|make|maak|build|generate|setup|zet|scaffold)\b/.test(text) &&
+    /\b(frontend|react|vite)\b/.test(text) &&
+    /\b(backend|express|api)\b/.test(text) &&
+    /\b(database|db|sql|schema|docker|compose)\b/.test(text);
+  return hasScaffoldIntent || (hasAction && hasStructurePhrase) || hasStackBreadth || hasReviewableBaseline;
+}
+
+export function detectCodeJobWorkflow({ prompt = "", responseMode = "auto", jobType = "prompt" } = {}) {
+  const normalizedResponseMode = normalizeResponseMode(responseMode);
+  if (normalizedResponseMode === "image") return "image";
+  if (jobType === "structure" || shouldUseStructureWorkflow(prompt)) return "structure";
+  if (shouldGenerateImage({ prompt, responseMode: normalizedResponseMode })) return "image";
+  return "code";
 }
 
 function isNoisyCodexLogLine(lower) {
@@ -448,6 +477,27 @@ function shouldKeepCodexLogLine(line) {
     isRealErrorLogLine(text) ||
     lower.includes("verification failed") ||
     lower.includes("succeeded")
+  );
+}
+
+function codeJobCodexExitError(code, stderr = "", stdout = "") {
+  const compactStderr = stderr.trim();
+  const compactStdout = stdout.trim();
+  const lower = `${compactStderr}\n${compactStdout}`.toLowerCase();
+  if (
+    lower.includes("cannot access session files") ||
+    (lower.includes(".codex") && lower.includes("permission denied"))
+  ) {
+    return new ExternalServiceError(
+      "KiraAI cannot access the Codex session directory. Restart the Docker app so startup permission repair can run, or fix CODEX_HOME_HOST ownership.",
+      { stderr: compactStderr, stdout: compactStdout },
+      "CODEX_HOME_PERMISSION_DENIED"
+    );
+  }
+  return new ExternalServiceError(
+    `KiraAI code job failed (code ${code})`,
+    { stderr: compactStderr, stdout: compactStdout },
+    "CODE_JOB_CODEX_NON_ZERO"
   );
 }
 
@@ -925,7 +975,7 @@ function imageEstimatedDurationLabel(provider = resolveImageProvider(config.imag
 
 function buildImageStartResponseMarkdown({ prompt = "", provider = resolveImageProvider(config.imageProvider) } = {}) {
   const preview = String(prompt || "").replace(/\s+/g, " ").trim().slice(0, 220);
-  const providerLabel = provider === "codex_cli" ? "Codex" : "KiraAI";
+  const providerLabel = provider === "fake" ? "KiraAI preview engine" : "KiraAI";
   return [
     "## Ik ga dit maken",
     preview
@@ -960,6 +1010,9 @@ function buildImageResponseMarkdown({ prompt = "", asset } = {}) {
 }
 
 function buildFailureResponseMarkdown(error) {
+  const nextStep = error?.code === "KIRAAI_SKILLS_REQUIRED"
+    ? "- Voeg eerst bronnen toe in Settings -> KiraAI Learning en start learning, daarna kun je de job opnieuw proberen."
+    : "- Gebruik Retry om dezelfde prompt opnieuw te proberen nadat de oorzaak is opgelost.";
   return [
     "## Gedaan",
     "KiraAI kon deze job niet afronden.",
@@ -969,7 +1022,7 @@ function buildFailureResponseMarkdown(error) {
     error?.code ? `- Code: ${error.code}` : "",
     "",
     "## Hoe verder",
-    "- Gebruik Retry om dezelfde prompt opnieuw te proberen nadat de oorzaak is opgelost."
+    nextStep
   ].filter((line) => line !== "").join("\n");
 }
 
@@ -1165,13 +1218,7 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
           finish();
           return;
         }
-        finish(
-          new ExternalServiceError(
-            `KiraAI code job failed (code ${code})`,
-            { stderr: stderr.trim(), stdout: stdout.trim() },
-            "CODE_JOB_CODEX_NON_ZERO"
-          )
-        );
+        finish(codeJobCodexExitError(code, stderr, stdout));
       });
     });
     await appendLog(jobId, "KiraAI engine finished", { durationMs: Date.now() - codexStartedAt });
@@ -1206,22 +1253,80 @@ function normalizeResponseMode(value) {
   return mode;
 }
 
+async function assertCodeJobCapacity() {
+  const limit = Number(config.codeJobMaxActive || 0);
+  if (!limit) return;
+  const active = await query(
+    "SELECT COUNT(*)::int AS count FROM code_jobs WHERE status IN ('queued','planning','running')"
+  );
+  const count = Number(active.rows[0]?.count || 0);
+  if (count >= limit) {
+    throw new RateLimitError(`Too many active code jobs. Wait for one to finish before starting another.`, {
+      active: count,
+      limit
+    });
+  }
+}
+
+export function hasSelectedLearnedSkills(mind = {}) {
+  return Array.isArray(mind.skills) && mind.skills.length > 0;
+}
+
+export function assertLearnedSkillsForCodeJob(mind = {}) {
+  if (!config.codeJobRequireLearnedSkills) return;
+  if (hasSelectedLearnedSkills(mind)) return;
+  throw new AppError(
+    "KiraAI has no learned skills for this prompt yet, so the job stopped before any generation engine could run.",
+    {
+      statusCode: 409,
+      code: "KIRAAI_SKILLS_REQUIRED",
+      details: {
+        reason: mind.warning || mind.selectorReason || "No learned KiraAI skills were selected.",
+        required: true
+      },
+      name: "KiraAiSkillsRequiredError"
+    }
+  );
+}
+
 export async function startCodeJob({ projectId, rootPath, userPrompt, jobType = "prompt", title = "", requestMetadata = {}, responseMode = "auto" }) {
   const resolved = await resolveCodeJobRoot({ projectId, rootPath });
   if (!userPrompt?.trim()) throw new ValidationError("Prompt is required");
+  await assertCodeJobCapacity();
   const normalizedResponseMode = normalizeResponseMode(responseMode || requestMetadata?.responseMode || "auto");
+  const originalPrompt = userPrompt.trim();
+  const workflowKind = detectCodeJobWorkflow({
+    prompt: originalPrompt,
+    responseMode: normalizedResponseMode,
+    jobType
+  });
+  const effectiveJobType = workflowKind === "structure" ? "structure" : jobType || "prompt";
+  const workflowPrompt = workflowKind === "structure"
+    ? buildFullStackStructurePrompt({
+        projectName: resolved.projectName,
+        instructions: originalPrompt
+      })
+    : originalPrompt;
   const imageProvider = resolveImageProvider(config.imageProvider);
-  const willGenerateImage = shouldGenerateImage({ prompt: userPrompt, responseMode: normalizedResponseMode });
+  const willGenerateImage = workflowKind === "image";
   const metadata = {
     ...(requestMetadata || {}),
-    responseMode: normalizedResponseMode
+    responseMode: normalizedResponseMode,
+    workflowKind,
+    workflowPrompt: workflowKind === "structure" ? workflowPrompt : undefined
   };
   const responseMetadata = willGenerateImage
     ? {
         responseMode: normalizedResponseMode,
+        workflowKind,
         imageProvider,
         estimatedDuration: imageEstimatedDurationLabel(imageProvider)
       }
+    : workflowKind === "structure"
+      ? {
+          responseMode: normalizedResponseMode,
+          workflowKind
+        }
     : {};
   const created = await query(
     `INSERT INTO code_jobs (project_id, root_path, user_prompt, model, status, job_type, title, request_metadata, response_kind, response_markdown, response_metadata)
@@ -1230,13 +1335,13 @@ export async function startCodeJob({ projectId, rootPath, userPrompt, jobType = 
     [
       resolved.projectId,
       resolved.safeRoot,
-      userPrompt,
+      originalPrompt,
       config.codeAiModel,
-      jobType || "prompt",
-      title || null,
+      effectiveJobType,
+      title || (workflowKind === "structure" ? "Full-stack structure proposal" : null),
       JSON.stringify(metadata),
       willGenerateImage ? "image" : "code",
-      willGenerateImage ? buildImageStartResponseMarkdown({ prompt: userPrompt, provider: imageProvider }) : null,
+      willGenerateImage ? buildImageStartResponseMarkdown({ prompt: originalPrompt, provider: imageProvider }) : null,
       JSON.stringify(responseMetadata)
     ]
   );
@@ -1250,10 +1355,9 @@ export async function startStructureCodeJob({ projectId, preset = "full_stack", 
   const project = await query("SELECT id, name, root_path FROM projects WHERE id=$1 LIMIT 1", [projectId]);
   if (!project.rowCount) throw new NotFoundError("Project not found");
   const row = project.rows[0];
-  const prompt = buildFullStackStructurePrompt({ projectName: row.name, instructions });
   return startCodeJob({
     projectId: row.id,
-    userPrompt: prompt,
+    userPrompt: String(instructions || "").trim() || "Create a full-stack project structure.",
     jobType: "structure",
     title: "Full-stack structure proposal",
     responseMode: "code",
@@ -1327,6 +1431,8 @@ export async function runCodeJob(jobId, { resumed = false, reason = "" } = {}) {
   let job = await claimCodeJobForRun(jobId, { resumed, reason });
   if (!job) return getCodeJob(jobId);
   const timer = timerFromCodeJob(job);
+  let learnedSkillNote = "";
+  let planningContext = null;
   await markCodeJobStage(jobId, timer, resumed ? "resume" : "start", {
     resumeCount: Number(job.resume_count || 0),
     reason: resumed ? reason || job.resume_reason || "server_restart" : "new_job"
@@ -1342,7 +1448,54 @@ export async function runCodeJob(jobId, { resumed = false, reason = "" } = {}) {
 
   const requestMetadata = job.request_metadata && typeof job.request_metadata === "object" ? job.request_metadata : {};
   const responseMode = normalizeResponseMode(requestMetadata.responseMode || "auto");
-  if (shouldGenerateImage({ prompt: job.user_prompt, responseMode })) {
+  const jobPrompt = String(requestMetadata.workflowPrompt || job.user_prompt || "");
+
+  async function loadPlanningContext() {
+    if (planningContext) return planningContext;
+
+    await markCodeJobStage(jobId, timer, "planning_context");
+    await setStatus(jobId, "planning");
+    await appendLog(jobId, "Loading learning profile and querying KiraAI skills");
+    const planningStartedAt = Date.now();
+    const [learningProfile, mind] = await Promise.all([
+      measureTimerStage(timer, "learning_profile", () => getLearningProfile(job.root_path).catch(() => ({}))),
+      measureTimerStage(timer, "ml_mind", () => buildMindContextForPrompt({ prompt: jobPrompt, codeJobId: job.id }).catch((error) => ({
+        context: "",
+        skills: [],
+        chunks: [],
+        warning: error.message
+      })))
+    ]);
+    const skillCount = mind.skills?.length || 0;
+    const skillWarning = mind.warning || "";
+    learnedSkillNote = skillCount
+      ? `KiraAI used ${skillCount} learned shared server skill(s) while planning.`
+      : "KiraAI stopped because no learned server skills were selected.";
+    await saveCodeJobTiming(jobId, timer);
+    await heartbeatCodeJob(jobId);
+    await appendLog(jobId, "Planning context ready", {
+      skills: skillCount,
+      chunks: mind.chunks?.length || 0,
+      warning: skillWarning || null,
+      durationMs: Date.now() - planningStartedAt,
+      selectorStrategy: mind.selectorStrategy || null,
+      cacheHit: mind.cacheHit ?? null,
+      candidateCount: mind.candidateCount ?? null
+    });
+    if (!skillCount) {
+      await appendLog(jobId, "No learned KiraAI skills selected", {
+        reason: skillWarning || "No matching learned skills were selected.",
+        scope: "shared_global_skill_library",
+        strictMode: Boolean(config.codeJobRequireLearnedSkills)
+      });
+    }
+    assertLearnedSkillsForCodeJob(mind);
+    planningContext = { learningProfile, mind };
+    return planningContext;
+  }
+
+  if (shouldGenerateImage({ prompt: jobPrompt, responseMode })) {
+    const { mind } = await loadPlanningContext();
     const imageProvider = resolveImageProvider(config.imageProvider);
     const estimatedDuration = imageEstimatedDurationLabel(imageProvider);
     await markCodeJobStage(jobId, timer, "image_generation");
@@ -1360,14 +1513,17 @@ export async function runCodeJob(jobId, { resumed = false, reason = "" } = {}) {
       configuredProvider: config.imageProvider,
       model: imageProvider === "codex_cli" ? config.imageCodexModel : imageProvider
     });
-    const generated = await measureTimerStage(timer, "image_provider", () => generateImageAsset({ prompt: job.user_prompt }));
+    const imagePrompt = mind.context
+      ? `${mind.context}\n\n## User image prompt\n${job.user_prompt}`
+      : job.user_prompt;
+    const generated = await measureTimerStage(timer, "image_provider", () => generateImageAsset({ prompt: imagePrompt }));
     const asset = await saveCodeJobAsset(jobId, generated);
     await saveCodeJobTiming(jobId, timer);
     const responseMarkdown = buildImageResponseMarkdown({ prompt: job.user_prompt, asset });
     job = await setStatus(jobId, "done", {
       changedFiles: [],
       diffSummary: "Generated 1 image asset. No project files were changed.",
-      riskNotes: ["Image-only job. Project files are untouched."],
+      riskNotes: ["Image-only job. Project files are untouched.", ...(learnedSkillNote ? [learnedSkillNote] : [])],
       testCommands: ["Open the generated image preview."],
       finalStatus: "done",
       responseMarkdown,
@@ -1395,35 +1551,13 @@ export async function runCodeJob(jobId, { resumed = false, reason = "" } = {}) {
     await markCodeJobStage(jobId, timer, "recovered_prompt", {
       resumeCount: Number(job.resume_count || 0)
     });
+    await loadPlanningContext();
     await setStatus(jobId, "running", { improvedPrompt });
     await appendLog(jobId, "Recovered saved prompt", { resumeCount: job.resume_count });
   } else {
-    await markCodeJobStage(jobId, timer, "planning_context");
-    await setStatus(jobId, "planning");
-    await appendLog(jobId, "Loading learning profile and querying KiraAI skills");
-    const planningStartedAt = Date.now();
-    const [learningProfile, mind] = await Promise.all([
-      measureTimerStage(timer, "learning_profile", () => getLearningProfile(job.root_path).catch(() => ({}))),
-      measureTimerStage(timer, "ml_mind", () => buildMindContextForPrompt({ prompt: job.user_prompt, codeJobId: job.id }).catch((error) => ({
-        context: "",
-        skills: [],
-        chunks: [],
-        warning: error.message
-      })))
-    ]);
-    await saveCodeJobTiming(jobId, timer);
-    await heartbeatCodeJob(jobId);
-    await appendLog(jobId, "Planning context ready", {
-      skills: mind.skills?.length || 0,
-      chunks: mind.chunks?.length || 0,
-      warning: mind.warning || null,
-      durationMs: Date.now() - planningStartedAt,
-      selectorStrategy: mind.selectorStrategy || null,
-      cacheHit: mind.cacheHit ?? null,
-      candidateCount: mind.candidateCount ?? null
-    });
+    const { learningProfile, mind } = await loadPlanningContext();
     improvedPrompt = buildImprovedPrompt({
-      userPrompt: job.user_prompt,
+      userPrompt: jobPrompt,
       learningProfile,
       mindContext: mind.context || ""
     });
@@ -1450,6 +1584,7 @@ export async function runCodeJob(jobId, { resumed = false, reason = "" } = {}) {
     : "KiraAI finished but did not modify files.";
   const riskNotes = [
     "Changes were made in an isolated temporary copy. Real project files are untouched until Accept Changes.",
+    ...(learnedSkillNote ? [learnedSkillNote] : []),
     ...(payload.truncated ? [`Only the first ${MAX_CHANGED_FILES} changed files are shown.`] : []),
     ...skippedFiles.map((file) => `${file.path}: ${file.diffSummary}`)
   ];
@@ -1519,6 +1654,12 @@ export async function getCodeJobAsset(jobId, assetId) {
 export async function listCodeJobs(limit = 20, offset = 0, filters = {}) {
   const clauses = [];
   const params = [];
+  const joins = [];
+  if (filters.userId) {
+    joins.push("JOIN project_memberships pm ON pm.project_id = c.project_id");
+    params.push(filters.userId);
+    clauses.push(`pm.user_id=$${params.length}`);
+  }
   if (filters.projectId) {
     params.push(filters.projectId);
     clauses.push(`c.project_id=$${params.length}`);
@@ -1539,6 +1680,7 @@ export async function listCodeJobs(limit = 20, offset = 0, filters = {}) {
   const rows = await query(
     `SELECT c.*, p.name AS project_name, p.root_path AS project_root_path, COALESCE(a.asset_count, 0)::int AS asset_count
      FROM code_jobs c
+     ${joins.join("\n     ")}
      LEFT JOIN projects p ON p.id = c.project_id
      LEFT JOIN (
        SELECT code_job_id, COUNT(*) AS asset_count
@@ -1565,17 +1707,31 @@ export async function applyCodeJob(jobId) {
   const job = await getCodeJob(jobId);
   if (job.status !== "awaiting_review") throw new ValidationError("Code job is not awaiting review");
   const changedFiles = Array.isArray(job.changed_files) ? job.changed_files : [];
-  const safeRoot = resolveSafePath(job.root_path);
+  const safeRoot = await resolveExistingSafePath(job.root_path);
   for (const file of changedFiles) {
     const target = path.resolve(safeRoot, file.path || "");
     const safeTarget = resolveSafePath(target);
     ensureInsideProjectRoot(safeRoot, safeTarget);
-    if (file.action === "delete") {
-      await fsDelete({ targetPath: safeTarget });
-      continue;
+    try {
+      if (file.action === "delete") {
+        await fsDelete({ targetPath: safeTarget });
+        continue;
+      }
+      if (file.action && file.action !== "upsert") continue;
+      await fsWriteFile({ targetPath: safeTarget, content: file.content || "", conflictPolicy: "overwrite" });
+    } catch (error) {
+      if (String(error?.message || "").toLowerCase().includes("access denied")) {
+        throw new ValidationError(
+          `Accept Changes cannot write "${file.path || safeTarget}". The selected project root is not writable by KiraAI. For local Docker Desktop projects mounted from C:/, set APP_USER=root in .env and recreate the app container. For production, keep projects inside a Linux workspace owned by APP_USER.`,
+          {
+            rootPath: safeRoot,
+            filePath: file.path || "",
+            cause: error.message
+          }
+        );
+      }
+      throw error;
     }
-    if (file.action && file.action !== "upsert") continue;
-    await fsWriteFile({ targetPath: safeTarget, content: file.content || "", conflictPolicy: "overwrite" });
   }
   await appendLog(jobId, "Applied code proposal", { changedFiles: changedFiles.length });
   return setStatus(jobId, "applied", { finalStatus: "applied" });

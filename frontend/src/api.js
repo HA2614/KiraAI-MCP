@@ -5,7 +5,8 @@ const API_ORIGIN = API_BASE_URL.replace(/\/api\/?$/, "");
 
 const client = axios.create({
   baseURL: API_BASE_URL,
-  timeout: Number(import.meta.env.VITE_API_TIMEOUT_MS || 15000)
+  timeout: Number(import.meta.env.VITE_API_TIMEOUT_MS || 15000),
+  withCredentials: true
 });
 
 function unwrap(response) {
@@ -18,29 +19,45 @@ function unwrap(response) {
   return response.data;
 }
 
+function normalizeApiError(error) {
+  const payload = error?.response?.data;
+  if (payload?.ok === false) {
+    const err = new Error(payload.error?.message || "Request failed");
+    err.details = payload.error;
+    return err;
+  }
+  if (error?.response?.status) {
+    return new Error(`Request failed (${error.response.status})`);
+  }
+  return error;
+}
+
+async function request(promise) {
+  try {
+    return unwrap(await promise);
+  } catch (error) {
+    throw normalizeApiError(error);
+  }
+}
+
 export async function apiGet(url, config = {}) {
-  const res = await client.get(url, config);
-  return unwrap(res);
+  return request(client.get(url, config));
 }
 
 export async function apiPost(url, body = {}, config = {}) {
-  const res = await client.post(url, body, config);
-  return unwrap(res);
+  return request(client.post(url, body, config));
 }
 
 export async function apiPut(url, body = {}, config = {}) {
-  const res = await client.put(url, body, config);
-  return unwrap(res);
+  return request(client.put(url, body, config));
 }
 
 export async function apiPatch(url, body = {}, config = {}) {
-  const res = await client.patch(url, body, config);
-  return unwrap(res);
+  return request(client.patch(url, body, config));
 }
 
 export async function apiDelete(url, config = {}) {
-  const res = await client.delete(url, config);
-  return unwrap(res);
+  return request(client.delete(url, config));
 }
 
 export async function importProject(targetPath) {
@@ -49,6 +66,46 @@ export async function importProject(targetPath) {
 
 export async function createProjectFolder(payload) {
   return apiPost("/projects/create-folder", payload);
+}
+
+export async function authStatus() {
+  return apiGet("/auth/status");
+}
+
+export async function setupAccount(email, password, displayName = "") {
+  return apiPost("/auth/setup", { email, password, displayName });
+}
+
+export async function login(email, password) {
+  return apiPost("/auth/login", { email, password });
+}
+
+export async function logout() {
+  return apiPost("/auth/logout", {});
+}
+
+export async function getInvite(token) {
+  return apiGet(`/invites/${encodeURIComponent(token)}`);
+}
+
+export async function acceptInvite(token, payload = {}) {
+  return apiPost(`/invites/${encodeURIComponent(token)}/accept`, payload);
+}
+
+export async function createProjectInvite(projectId, email) {
+  return apiPost(`/projects/${projectId}/invites`, { email });
+}
+
+export async function getProjectMembers(projectId) {
+  return apiGet(`/projects/${projectId}/members`);
+}
+
+export async function removeProjectMember(projectId, userId) {
+  return apiDelete(`/projects/${projectId}/members/${userId}`);
+}
+
+export async function revokeProjectInvite(projectId, inviteId) {
+  return apiPost(`/projects/${projectId}/invites/${inviteId}/revoke`, {});
 }
 
 export async function fsList(targetPath) {
@@ -92,7 +149,7 @@ export async function fsCopy(sourcePath, destinationPath, conflictPolicy = "fail
 }
 
 export function openFsEvents(root) {
-  return new EventSource(`${API_ORIGIN}/api/fs/events?root=${encodeURIComponent(root)}`);
+  return new EventSource(`${API_ORIGIN}/api/fs/events?root=${encodeURIComponent(root)}`, { withCredentials: true });
 }
 
 export async function createCodeJob(projectId, userPrompt, options = {}) {
@@ -156,9 +213,9 @@ export async function healthCheck(timeout = 3000) {
 }
 
 export function openCodeJobEvents(id) {
-  return new EventSource(`${API_ORIGIN}/api/code-jobs/${id}/events`);
+  return new EventSource(`${API_ORIGIN}/api/code-jobs/${id}/events`, { withCredentials: true });
 }
 
 export function openMlJobEvents(id) {
-  return new EventSource(`${API_ORIGIN}/api/ml/jobs/${id}/events`);
+  return new EventSource(`${API_ORIGIN}/api/ml/jobs/${id}/events`, { withCredentials: true });
 }

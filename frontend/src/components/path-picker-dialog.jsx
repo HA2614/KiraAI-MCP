@@ -64,31 +64,31 @@ export function PathPickerDialog({ value, onSelect, triggerLabel = "Browse" }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild><Button variant="outline">{triggerLabel}</Button></DialogTrigger>
-      <DialogContent className="max-w-4xl overflow-hidden border-slate-300 p-0">
-        <DialogHeader className="border-b border-slate-300 bg-[#fafafa] px-4 py-3">
+      <DialogContent className="max-w-4xl overflow-hidden p-0">
+        <DialogHeader className="border-b border-border/70 bg-secondary/20 px-4 py-3">
           <DialogTitle className="flex items-center gap-2 text-base">
             <Folder className="h-5 w-5 fill-[#f7d774] text-[#c28a20]" />
             Select folder
           </DialogTitle>
         </DialogHeader>
-        <div className="bg-[#f3f3f3]">
-          <div className="flex items-center gap-1 border-b border-slate-300 px-3 py-2">
+        <div className="bg-card">
+          <div className="flex items-center gap-1 border-b border-border/70 bg-background/40 px-3 py-2">
             <WinIconButton title="Back" onClick={goBack} disabled={!backStack.length}><ChevronLeft className="h-4 w-4" /></WinIconButton>
             <WinIconButton title="Forward" onClick={goForward} disabled={!forwardStack.length}><ChevronRight className="h-4 w-4" /></WinIconButton>
             <WinIconButton title="Refresh" onClick={() => fsList(current).then((data) => setItems(data.entries || []))}><RefreshCw className="h-4 w-4" /></WinIconButton>
             <form className="ml-2 flex flex-1 gap-2" onSubmit={submitAddress}>
-              <Input className="h-9 rounded-sm border-slate-300 bg-white font-mono text-xs" value={addressDraft} onChange={(event) => setAddressDraft(event.target.value)} />
-              <Button className="h-9 rounded-sm bg-[#0078d4] hover:bg-[#106ebe]" type="submit">Go</Button>
+              <Input className="h-9 font-mono text-xs" value={addressDraft} onChange={(event) => setAddressDraft(event.target.value)} />
+              <Button className="h-9" type="submit">Go</Button>
             </form>
           </div>
-          <ScrollArea className="h-[380px] bg-white">
+          <ScrollArea className="h-[380px] bg-card/40">
             <div className="grid p-2">
               {folders.map((folder) => (
                 <button
                   key={folder.path}
                   type="button"
-                  className={`grid grid-cols-[28px_1fr_180px] items-center rounded-sm px-2 py-1.5 text-left text-sm hover:bg-[#e5f3ff] focus:bg-[#cce8ff] ${
-                    selectedFolder?.path === folder.path ? "bg-[#cce8ff] ring-1 ring-inset ring-[#99d1ff]" : ""
+                  className={`grid grid-cols-[28px_1fr_180px] items-center rounded-md px-2 py-1.5 text-left text-sm text-foreground transition-colors hover:bg-secondary focus:bg-primary/10 ${
+                    selectedFolder?.path === folder.path ? "bg-primary/10 ring-1 ring-inset ring-primary/40" : ""
                   }`}
                   onClick={() => setSelectedFolder(folder)}
                   onDoubleClick={() => navigate(folder.path)}
@@ -96,15 +96,15 @@ export function PathPickerDialog({ value, onSelect, triggerLabel = "Browse" }) {
                 >
                   <Folder className="h-4 w-4 fill-[#f7d774] text-[#c28a20]" />
                   <span className="truncate">{folder.name}</span>
-                  <span className="truncate text-xs text-slate-500">{folder.modifiedAt ? new Date(folder.modifiedAt).toLocaleDateString() : ""}</span>
+                  <span className="truncate text-xs text-muted-foreground">{folder.modifiedAt ? new Date(folder.modifiedAt).toLocaleDateString() : ""}</span>
                 </button>
               ))}
-              {!folders.length ? <p className="rounded-sm border border-dashed p-4 text-sm text-slate-500">No folders found here.</p> : null}
+              {!folders.length ? <p className="rounded-md border border-dashed border-border/70 p-4 text-sm text-muted-foreground">No folders found here.</p> : null}
             </div>
           </ScrollArea>
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-300 bg-[#f7f7f7] px-3 py-3">
-            <p className="min-w-0 flex-1 truncate font-mono text-xs text-slate-600">{selectedFolder?.path || current}</p>
-            <Button className="rounded-sm bg-[#0078d4] hover:bg-[#106ebe]" onClick={() => { onSelect(selectedFolder?.path || current); setOpen(false); }}>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 bg-secondary/20 px-3 py-3">
+            <p className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">{selectedFolder?.path || current}</p>
+            <Button onClick={() => { onSelect(selectedFolder?.path || current); setOpen(false); }}>
               Use this folder
             </Button>
           </div>
@@ -116,7 +116,7 @@ export function PathPickerDialog({ value, onSelect, triggerLabel = "Browse" }) {
 
 function WinIconButton({ children, ...props }) {
   return (
-    <Button variant="ghost" size="sm" className="h-8 w-8 rounded-sm border border-transparent px-0 text-slate-700 hover:border-slate-300 hover:bg-white" {...props}>
+    <Button variant="ghost" size="sm" className="h-8 w-8 rounded-md border border-transparent px-0 text-muted-foreground hover:border-border hover:bg-secondary hover:text-foreground" {...props}>
       {children}
     </Button>
   );

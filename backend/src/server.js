@@ -1,5 +1,7 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -10,15 +12,69 @@ import { attachRequestId, fail } from "./response.js";
 import { logError, logInfo } from "./logger.js";
 import { recoverInterruptedCodeJobsOnStartup } from "./codeJobs.js";
 import { recoverInterruptedMlJobsOnStartup } from "./mlMind.js";
+import { authRouter, bootstrapAuth, isAllowedOrigin, optionalAuth, originGuard, requireAuth } from "./auth.js";
 
 const app = express();
+app.disable("x-powered-by");
+if (config.trustProxy) app.set("trust proxy", 1);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..", "..");
 const defaultStaticDir = path.join(repoRoot, "frontend", "dist");
 
-app.use(cors());
+function corsOptions(req, callback) {
+  const origin = req.headers.origin;
+  if (!origin) return callback(null, { origin: false, credentials: true });
+  if (!config.authEnabled && !config.corsAllowedOrigins.length) {
+    return callback(null, { origin: true, credentials: true });
+  }
+  return callback(null, {
+    origin: isAllowedOrigin(req, origin),
+    credentials: true
+  });
+}
+
+const globalApiLimiter = rateLimit({
+  windowMs: config.rateLimitWindowMs,
+  limit: config.rateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => fail(res, "Too many requests", 429, "RATE_LIMITED")
+});
+
+const loginLimiter = rateLimit({
+  windowMs: config.rateLimitWindowMs,
+  limit: config.loginRateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => fail(res, "Too many login attempts", 429, "RATE_LIMITED")
+});
+
+const expensiveLimiter = rateLimit({
+  windowMs: config.rateLimitWindowMs,
+  limit: config.expensiveRateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => fail(res, "Too many expensive requests", 429, "RATE_LIMITED")
+});
+
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      baseUri: ["'self'"],
+      objectSrc: ["'none'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:"],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'none'"]
+    }
+  },
+  crossOriginEmbedderPolicy: false
+}));
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 app.use(attachRequestId);
 
@@ -37,6 +93,13 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use("/api", globalApiLimiter);
+app.use("/api", optionalAuth);
+app.use("/api", originGuard);
+app.use("/api/auth/login", loginLimiter);
+app.use("/api/auth", authRouter);
+app.use("/api", requireAuth);
+app.use(["/api/code-jobs", "/api/ml", "/api/analysis"], expensiveLimiter);
 app.use("/api", router);
 
 const staticDir = config.staticFrontendDir ? path.resolve(config.staticFrontendDir) : defaultStaticDir;
@@ -59,6 +122,9 @@ if (hasStaticBuild) {
 app.use((err, req, res, _next) => {
   const statusCode = err?.statusCode || 500;
   const code = err?.code || "INTERNAL_ERROR";
+  const exposed = err?.expose ?? statusCode < 500;
+  const message = exposed ? (err?.message || "Request failed") : "Internal server error";
+  const details = exposed ? (err?.details || null) : null;
   logError("http_request_error", {
     requestId: req.requestId,
     method: req.method,
@@ -67,11 +133,12 @@ app.use((err, req, res, _next) => {
     statusCode,
     message: err.message
   });
-  fail(res, err?.message || "Internal server error", statusCode, code, err?.details || null);
+  fail(res, message, statusCode, code, details);
 });
 
 async function bootstrap() {
   await connectRedis();
+  await bootstrapAuth();
   const resumedCodeJobs = await recoverInterruptedCodeJobsOnStartup();
   if (resumedCodeJobs.length) {
     logInfo("code_jobs_resumed_on_startup", { count: resumedCodeJobs.length });

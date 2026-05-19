@@ -5,6 +5,10 @@ IFS=$'\n\t'
 KIRAAI_REPO_URL="${KIRAAI_REPO_URL:-https://github.com/HA2614/KiraAI-MCP.git}"
 KIRAAI_BRANCH="${KIRAAI_BRANCH:-main}"
 KIRAAI_SKIP_CODEX_LOGIN="${KIRAAI_SKIP_CODEX_LOGIN:-0}"
+KIRAAI_PROFILE="${KIRAAI_PROFILE:-local}"
+KIRAAI_PUBLIC_URL="${KIRAAI_PUBLIC_URL:-}"
+KIRAAI_ADMIN_EMAIL="${KIRAAI_ADMIN_EMAIL:-}"
+KIRAAI_ADMIN_PASSWORD="${KIRAAI_ADMIN_PASSWORD:-}"
 
 if [[ -n "${KIRAAI_INSTALL_DIR:-}" ]]; then
   INSTALL_DIR="$KIRAAI_INSTALL_DIR"
@@ -14,7 +18,7 @@ else
   INSTALL_DIR="$HOME/apps/KiraAI-MCP"
 fi
 
-TOTAL_STEPS=11
+TOTAL_STEPS=12
 CURRENT_STEP=0
 LAST_STEP="startup"
 PROJECT_DIR=""
@@ -75,6 +79,30 @@ run_step() {
 
 docker_compose() {
   "${DOCKER_CMD[@]}" compose "$@"
+}
+
+random_secret() {
+  local bytes="${1:-48}"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 "$bytes" | tr '+/' '-_' | tr -d '=\n'
+  else
+    head -c "$bytes" /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n'
+  fi
+}
+
+env_file_value() {
+  local file="$1"
+  local key="$2"
+  local value=""
+  if [[ -f "$file" ]]; then
+    value="$(grep -E "^${key}=" "$file" | tail -n 1 | cut -d= -f2- || true)"
+  fi
+  printf '%s' "$value"
+}
+
+url_origin() {
+  local url="$1"
+  printf '%s' "$url" | sed -E 's#^(https?://[^/]+).*#\1#'
 }
 
 preflight() {
@@ -220,24 +248,126 @@ write_env() {
     cp .env.example .env
   fi
 
-  set_env_value .env APP_BIND_HOST "0.0.0.0"
   set_env_value .env VITE_API_URL "/api"
   set_env_value .env HOST_WORKSPACE_ROOT "./workspace"
   set_env_value .env CONTAINER_FS_ROOT "/workspace"
   set_env_value .env CODEX_HOME_HOST "./.codex-host"
   set_env_value .env IMAGE_PROVIDER "codex_cli"
-  set_env_value .env CODE_JOB_SANDBOX "danger-full-access"
-  set_env_value .env CODEX_SUMMARY_SANDBOX "danger-full-access"
+  set_env_value .env IMAGE_CODEX_SANDBOX "workspace-write"
+  set_env_value .env ML_ALLOW_PRIVATE_NETWORK_FETCHES "false"
+  set_env_value .env CODE_JOB_REQUIRE_LEARNED_SKILLS "true"
+
+  if [[ "$KIRAAI_PROFILE" == "production" ]]; then
+    local session_secret
+    local postgres_password
+    local public_origin
+    session_secret="$(env_file_value .env SESSION_SECRET)"
+    postgres_password="$(env_file_value .env POSTGRES_PASSWORD)"
+    if [[ -z "$session_secret" ]]; then
+      session_secret="$(random_secret 48)"
+    fi
+    if [[ -z "$postgres_password" || "$postgres_password" == "postgres" ]]; then
+      postgres_password="$(random_secret 32)"
+    fi
+    public_origin=""
+    if [[ -n "$KIRAAI_PUBLIC_URL" ]]; then
+      public_origin="$(url_origin "$KIRAAI_PUBLIC_URL")"
+    fi
+
+    set_env_value .env APP_BIND_HOST "127.0.0.1"
+    set_env_value .env POSTGRES_PASSWORD "$postgres_password"
+    set_env_value .env AUTH_ENABLED "true"
+    set_env_value .env AUTH_BOOTSTRAP_EMAIL "$(env_file_value .env AUTH_BOOTSTRAP_EMAIL)"
+    set_env_value .env INVITE_TTL_MS "604800000"
+    set_env_value .env SESSION_SECRET "$session_secret"
+    set_env_value .env AUTH_SESSION_TTL_MS "43200000"
+    set_env_value .env AUTH_COOKIE_SECURE "$([[ "$public_origin" == https://* ]] && echo true || echo false)"
+    set_env_value .env CORS_ALLOWED_ORIGINS "$public_origin"
+    set_env_value .env TRUST_PROXY "true"
+    set_env_value .env RATE_LIMIT_WINDOW_MS "60000"
+    set_env_value .env RATE_LIMIT_MAX "300"
+    set_env_value .env AUTH_LOGIN_RATE_LIMIT_MAX "10"
+    set_env_value .env EXPENSIVE_RATE_LIMIT_MAX "30"
+    set_env_value .env CODE_JOB_MAX_ACTIVE "1"
+    set_env_value .env ML_JOB_MAX_ACTIVE "1"
+    set_env_value .env FS_MAX_READ_BYTES "1048576"
+    set_env_value .env APP_USER "node"
+    set_env_value .env CODE_JOB_SANDBOX "workspace-write"
+    set_env_value .env CODEX_SUMMARY_SANDBOX "read-only"
+    echo "Production profile enabled. App port binds to 127.0.0.1; use a reverse proxy/TLS for public access."
+  else
+    set_env_value .env APP_BIND_HOST "0.0.0.0"
+    set_env_value .env AUTH_ENABLED "false"
+    set_env_value .env POSTGRES_PASSWORD "postgres"
+    set_env_value .env APP_USER "root"
+    set_env_value .env CODE_JOB_SANDBOX "danger-full-access"
+    set_env_value .env CODEX_SUMMARY_SANDBOX "danger-full-access"
+  fi
 }
 
 create_runtime_dirs() {
   cd "$PROJECT_DIR"
   mkdir -p workspace .codex-host
+  "${SUDO_CMD[@]}" chown -R "$(id -u):$(id -g)" workspace .codex-host 2>/dev/null || true
+  chmod -R u+rwX workspace .codex-host
 }
 
 build_app_image() {
   cd "$PROJECT_DIR"
   docker_compose build app
+}
+
+configure_production_auth() {
+  cd "$PROJECT_DIR"
+  if [[ "$KIRAAI_PROFILE" != "production" ]]; then
+    echo "Skipping production auth setup because KIRAAI_PROFILE=${KIRAAI_PROFILE}."
+    return 0
+  fi
+
+  local existing_hash
+  existing_hash="$(env_file_value .env AUTH_ADMIN_PASSWORD_HASH)"
+  if [[ -n "$existing_hash" ]]; then
+    if [[ -n "$KIRAAI_ADMIN_EMAIL" ]]; then
+      set_env_value .env AUTH_BOOTSTRAP_EMAIL "$KIRAAI_ADMIN_EMAIL"
+    elif [[ -z "$(env_file_value .env AUTH_BOOTSTRAP_EMAIL)" ]]; then
+      set_env_value .env AUTH_BOOTSTRAP_EMAIL "admin@kiraai.local"
+    fi
+    echo "Existing AUTH_ADMIN_PASSWORD_HASH found; keeping current admin password."
+    return 0
+  fi
+
+  local admin_email="$KIRAAI_ADMIN_EMAIL"
+  if [[ -z "$admin_email" ]]; then
+    admin_email="$(env_file_value .env AUTH_BOOTSTRAP_EMAIL)"
+  fi
+  if [[ -z "$admin_email" ]]; then
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      fail "Production install needs KIRAAI_ADMIN_EMAIL or an interactive terminal."
+    fi
+    read -rp "KiraAI admin email: " admin_email
+  fi
+  [[ "$admin_email" == *@*.* ]] || fail "Admin email must be a valid email address."
+
+  local password="$KIRAAI_ADMIN_PASSWORD"
+  if [[ -z "$password" ]]; then
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      fail "Production install needs KIRAAI_ADMIN_PASSWORD or an interactive terminal."
+    fi
+    local password_confirm=""
+    read -rsp "Create KiraAI admin password: " password
+    echo
+    read -rsp "Confirm KiraAI admin password: " password_confirm
+    echo
+    [[ "$password" == "$password_confirm" ]] || fail "Admin passwords did not match."
+  fi
+  [[ "${#password}" -ge 10 ]] || fail "Admin password must be at least 10 characters."
+
+  local hash
+  hash="$(docker_compose run --rm -T --no-deps -e KIRAAI_ADMIN_PASSWORD="$password" app node backend/src/hashPassword.js --env)"
+  set_env_value .env AUTH_BOOTSTRAP_EMAIL "$admin_email"
+  set_env_value .env AUTH_ADMIN_PASSWORD_HASH "$hash"
+  unset KIRAAI_ADMIN_PASSWORD
+  echo "Admin email and password hash written to .env."
 }
 
 codex_device_login() {
@@ -308,8 +438,17 @@ finish_message() {
   echo
   echo "KiraAI-MCP install complete."
   echo "Project: ${PROJECT_DIR}"
+  echo "Profile: ${KIRAAI_PROFILE}"
   echo "Open from this VM: http://localhost:${app_port}"
-  echo "Open from your host browser: http://${server_ip}:${app_port}"
+  if [[ "$KIRAAI_PROFILE" == "production" ]]; then
+    if [[ -n "$KIRAAI_PUBLIC_URL" ]]; then
+      echo "Public URL: ${KIRAAI_PUBLIC_URL}"
+    else
+      echo "Production mode binds to localhost. Put Nginx/Caddy/TLS in front before exposing it publicly."
+    fi
+  else
+    echo "Open from your host browser: http://${server_ip}:${app_port}"
+  fi
   echo
   echo "Useful commands:"
   echo "  cd \"${PROJECT_DIR}\""
@@ -330,6 +469,7 @@ main() {
   run_step "Write server .env values" write_env
   run_step "Create runtime directories" create_runtime_dirs
   run_step "Build KiraAI app image" build_app_image
+  run_step "Configure production auth" configure_production_auth
   run_step "Codex device-auth login" codex_device_login
   run_step "Start Docker Compose services" start_services
   run_step "Verify KiraAI health" verify_app

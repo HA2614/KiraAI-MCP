@@ -5,12 +5,54 @@ CREATE TABLE IF NOT EXISTS projects (
   tech_stack TEXT,
   timeline TEXT,
   budget TEXT,
+  owner_user_id INTEGER,
+  created_by_user_id INTEGER,
   root_path TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS root_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_user_id INTEGER;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER;
+
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'user',
+  status TEXT NOT NULL DEFAULT 'active',
+  workspace_root TEXT NOT NULL DEFAULT '',
+  last_login_at TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS project_memberships (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'editor',
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE (project_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_invites (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL DEFAULT 'editor',
+  invited_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  accepted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  expires_at TIMESTAMP NOT NULL,
+  accepted_at TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS project_plans (
   id SERIAL PRIMARY KEY,
@@ -313,6 +355,35 @@ CREATE TABLE IF NOT EXISTS ml_mind_cache (
   UNIQUE (prompt_hash, skill_version)
 );
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'projects_owner_user_id_fkey'
+  ) THEN
+    ALTER TABLE projects
+      ADD CONSTRAINT projects_owner_user_id_fkey
+      FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE SET NULL
+      NOT VALID;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'projects_created_by_user_id_fkey'
+  ) THEN
+    ALTER TABLE projects
+      ADD CONSTRAINT projects_created_by_user_id_fkey
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+      NOT VALID;
+  END IF;
+END $$;
+
+ALTER TABLE projects VALIDATE CONSTRAINT projects_owner_user_id_fkey;
+ALTER TABLE projects VALIDATE CONSTRAINT projects_created_by_user_id_fkey;
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+CREATE INDEX IF NOT EXISTS idx_project_memberships_user ON project_memberships(user_id);
+CREATE INDEX IF NOT EXISTS idx_project_memberships_project ON project_memberships(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_invites_token_hash ON project_invites(token_hash);
+CREATE INDEX IF NOT EXISTS idx_project_invites_project ON project_invites(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_ml_sources_enabled ON ml_sources(enabled);
 CREATE INDEX IF NOT EXISTS idx_ml_sources_archived ON ml_sources(archived);
 CREATE INDEX IF NOT EXISTS idx_ml_sources_type_hash ON ml_sources(source_type, input_hash);

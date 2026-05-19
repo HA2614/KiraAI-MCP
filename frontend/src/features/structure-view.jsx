@@ -11,8 +11,8 @@ export function StructureView({ settings, setSettings, runStructure, selectedPro
     <Card>
       <CardHeader><CardTitle>Advanced Structure Generator</CardTitle></CardHeader>
       <CardContent className="space-y-3">
-        <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-          This legacy generator writes or previews scaffolds directly. For reviewable full-stack proposals, use KiraAI Code and start the Full-stack Structure Workflow.
+        <div className="state-warning rounded-md border p-3 text-sm">
+          This legacy generator writes or previews scaffolds directly. For reviewable full-stack proposals, use the normal KiraAI Code prompt and ask for a full-stack structure.
         </div>
         <div className="flex gap-2">
           <Input value={settings.targetPath} onChange={(e) => setSettings({ ...settings, targetPath: e.target.value })} placeholder="Target path" />

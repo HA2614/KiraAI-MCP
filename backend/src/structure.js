@@ -3,12 +3,14 @@ import {
   mkdir,
   readdir,
   readFile,
+  lstat,
   stat,
   writeFile,
   access,
   rm,
   rename,
-  copyFile
+  copyFile,
+  realpath
 } from "node:fs/promises";
 import { constants } from "node:fs";
 import { config } from "./config.js";
@@ -16,6 +18,7 @@ import { ValidationError } from "./errors.js";
 
 const ALLOWED_ROOT = path.resolve(config.fsBasePath);
 const TREE_MAX_DIRS_PER_LEVEL = Number(process.env.FS_TREE_MAX_DIRS || 80);
+let allowedRootRealPath = null;
 
 function withSep(p) {
   return p.endsWith(path.sep) ? p : `${p}${path.sep}`;
@@ -56,6 +59,69 @@ export function resolveSafePath(targetPath) {
   return resolved;
 }
 
+async function getAllowedRootRealPath() {
+  if (!allowedRootRealPath) {
+    await mkdir(ALLOWED_ROOT, { recursive: true });
+    allowedRootRealPath = await realpath(ALLOWED_ROOT);
+  }
+  return allowedRootRealPath;
+}
+
+function isInsideRoot(root, target) {
+  const relative = path.relative(root, target);
+  return !relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function assertRealPathInsideRoot(targetPath) {
+  const root = await getAllowedRootRealPath();
+  const real = await realpath(targetPath);
+  if (!isInsideRoot(root, real)) {
+    throw new ValidationError(`Path resolves outside allowed FS root: ${ALLOWED_ROOT}`);
+  }
+  return real;
+}
+
+export async function resolveExistingSafePath(targetPath) {
+  const resolved = resolveSafePath(targetPath);
+  await assertRealPathInsideRoot(resolved);
+  return resolved;
+}
+
+async function nearestExistingParent(targetPath) {
+  let current = path.dirname(targetPath);
+  const root = path.parse(current).root;
+  while (current && current !== root) {
+    try {
+      await lstat(current);
+      return current;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      current = path.dirname(current);
+    }
+  }
+  return current || root;
+}
+
+export async function resolveWritableSafePath(targetPath) {
+  const resolved = resolveSafePath(targetPath);
+  try {
+    await lstat(resolved);
+    await assertRealPathInsideRoot(resolved);
+    return resolved;
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const parent = await nearestExistingParent(resolved);
+  await assertRealPathInsideRoot(parent);
+  return resolved;
+}
+
+function assertNotRootMutation(targetPath) {
+  if (isBroadTraversalRoot(targetPath)) {
+    throw new ValidationError("Refusing to mutate the filesystem root or workspace root");
+  }
+}
+
 export function mapFsError(error, resolvedPath) {
   const code = error?.code || "";
   if (code === "ENOENT") return new ValidationError(`Path not found: ${resolvedPath}`);
@@ -79,6 +145,7 @@ async function fileExists(filePath) {
 async function toFsEntry(fullPath, dirent = null) {
   let st = null;
   try {
+    await assertRealPathInsideRoot(fullPath);
     st = await stat(fullPath);
   } catch (error) {
     if (!dirent) throw error;
@@ -112,7 +179,7 @@ function normalizeConflict(policy = "fail") {
 }
 
 export async function fsList({ targetPath, includeHidden = true }) {
-  const resolved = resolveSafePath(targetPath);
+  const resolved = await resolveExistingSafePath(targetPath);
   try {
     const entries = await readdir(resolved, { withFileTypes: true });
     const mapped = [];
@@ -139,7 +206,7 @@ export async function fsList({ targetPath, includeHidden = true }) {
 }
 
 export async function fsTree({ targetPath, depth = 2 }) {
-  const resolved = resolveSafePath(targetPath);
+  const resolved = await resolveExistingSafePath(targetPath);
   const requestedDepth = Math.max(1, Math.min(5, Number(depth || 2)));
   const safeDepth = isBroadTraversalRoot(resolved) ? 1 : requestedDepth;
   async function walk(current, level) {
@@ -167,7 +234,7 @@ export async function fsTree({ targetPath, depth = 2 }) {
 }
 
 export async function fsStat({ targetPath }) {
-  const resolved = resolveSafePath(targetPath);
+  const resolved = await resolveExistingSafePath(targetPath);
   try {
     return await toFsEntry(resolved);
   } catch (error) {
@@ -176,10 +243,13 @@ export async function fsStat({ targetPath }) {
 }
 
 export async function fsReadFile({ targetPath }) {
-  const resolved = resolveSafePath(targetPath);
+  const resolved = await resolveExistingSafePath(targetPath);
   try {
     const st = await stat(resolved);
     if (!st.isFile()) throw new ValidationError("Target is not a file");
+    if (st.size > config.fsMaxReadBytes) {
+      throw new ValidationError(`File is larger than FS_MAX_READ_BYTES (${config.fsMaxReadBytes})`);
+    }
     return { path: resolved, content: await readFile(resolved, "utf8") };
   } catch (error) {
     throw mapFsError(error, resolved);
@@ -187,7 +257,8 @@ export async function fsReadFile({ targetPath }) {
 }
 
 export async function fsWriteFile({ targetPath, content, conflictPolicy = "overwrite" }) {
-  const resolved = resolveSafePath(targetPath);
+  const resolved = await resolveWritableSafePath(targetPath);
+  assertNotRootMutation(resolved);
   const policy = normalizeConflict(conflictPolicy);
   try {
     const exists = await fileExists(resolved);
@@ -202,7 +273,7 @@ export async function fsWriteFile({ targetPath, content, conflictPolicy = "overw
 }
 
 export async function fsMkdir({ targetPath }) {
-  const resolved = resolveSafePath(targetPath);
+  const resolved = await resolveWritableSafePath(targetPath);
   await mkdir(resolved, { recursive: true });
   return { ok: true, action: "mkdir", path: resolved, status: "created" };
 }
@@ -212,8 +283,10 @@ export async function fsCreateFile({ targetPath, content = "", conflictPolicy = 
 }
 
 export async function fsRename({ sourcePath, newName, conflictPolicy = "fail" }) {
-  const source = resolveSafePath(sourcePath);
-  const destination = resolveSafePath(path.join(path.dirname(source), newName));
+  const source = await resolveExistingSafePath(sourcePath);
+  assertNotRootMutation(source);
+  const destination = await resolveWritableSafePath(path.join(path.dirname(source), newName));
+  assertNotRootMutation(destination);
   const policy = normalizeConflict(conflictPolicy);
   const exists = await fileExists(destination);
   if (exists && policy === "fail") return { ok: false, action: "rename", path: source, status: "conflict", destination };
@@ -224,8 +297,10 @@ export async function fsRename({ sourcePath, newName, conflictPolicy = "fail" })
 }
 
 export async function fsMove({ sourcePath, destinationPath, conflictPolicy = "fail" }) {
-  const source = resolveSafePath(sourcePath);
-  const destination = resolveSafePath(destinationPath);
+  const source = await resolveExistingSafePath(sourcePath);
+  assertNotRootMutation(source);
+  const destination = await resolveWritableSafePath(destinationPath);
+  assertNotRootMutation(destination);
   const policy = normalizeConflict(conflictPolicy);
   const exists = await fileExists(destination);
   if (exists && policy === "fail") return { ok: false, action: "move", path: source, status: "conflict", destination };
@@ -237,6 +312,8 @@ export async function fsMove({ sourcePath, destinationPath, conflictPolicy = "fa
 }
 
 async function copyRecursive(source, destination, policy) {
+  await resolveExistingSafePath(source);
+  await resolveWritableSafePath(destination);
   const st = await stat(source);
   const destinationExists = await fileExists(destination);
   if (destinationExists && policy === "fail") return { ok: false, status: "conflict" };
@@ -254,15 +331,18 @@ async function copyRecursive(source, destination, policy) {
 }
 
 export async function fsCopy({ sourcePath, destinationPath, conflictPolicy = "fail" }) {
-  const source = resolveSafePath(sourcePath);
-  const destination = resolveSafePath(destinationPath);
+  const source = await resolveExistingSafePath(sourcePath);
+  assertNotRootMutation(source);
+  const destination = await resolveWritableSafePath(destinationPath);
+  assertNotRootMutation(destination);
   const policy = normalizeConflict(conflictPolicy);
   const result = await copyRecursive(source, destination, policy);
   return { ok: result.ok, action: "copy", path: source, destination, status: result.status };
 }
 
 export async function fsDelete({ targetPath }) {
-  const resolved = resolveSafePath(targetPath);
+  const resolved = await resolveExistingSafePath(targetPath);
+  assertNotRootMutation(resolved);
   await rm(resolved, { recursive: true, force: true });
   return { ok: true, action: "delete", path: resolved, status: "deleted" };
 }
@@ -326,7 +406,7 @@ export async function generateProjectStructure({ targetPath, project, plan, prof
   const profiles = new Set(["web+api", "api", "web", "docs-only"]);
   if (!profiles.has(profile)) throw new ValidationError("Invalid profile. Use web+api, web, api, or docs-only.");
   if (!["skip_existing", "overwrite_all", "prompt_conflicts"].includes(overwriteStrategy)) throw new ValidationError("Invalid overwriteStrategy");
-  const safeBase = resolveSafePath(targetPath);
+  const safeBase = await resolveWritableSafePath(targetPath);
   const root = path.resolve(safeBase, slugify(project.name || "project"));
   const createdFiles = [];
   const skippedFiles = [];
@@ -337,6 +417,7 @@ export async function generateProjectStructure({ targetPath, project, plan, prof
     const exists = await fileExists(file);
     if (exists && overwriteStrategy === "prompt_conflicts") { conflicts.push(file); continue; }
     if (exists && overwriteStrategy === "skip_existing") { skippedFiles.push(file); continue; }
+    await resolveWritableSafePath(file);
     await ensureDir(path.dirname(file));
     await writeFile(file, content, "utf8");
     createdFiles.push(file);

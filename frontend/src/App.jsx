@@ -4,8 +4,10 @@ import {
   apiPost,
   apiPut,
   applyCodeJob,
+  acceptInvite,
+  authStatus,
   createCodeJob,
-  createCodeStructureJob,
+  createProjectInvite,
   createProjectFolder,
   fsCopy,
   fsCreateFile,
@@ -17,18 +19,27 @@ import {
   fsRename,
   fsTree,
   fsWrite,
+  getInvite,
   getCodeJob,
+  getProjectMembers,
   getProjectPerformanceRuns,
   healthCheck,
   importProject,
   listCodeJobs,
   listProjectCodeJobs,
+  login as authLogin,
+  logout as authLogout,
   openCodeJobEvents,
   openFsEvents,
-  rejectCodeJob
+  rejectCodeJob,
+  removeProjectMember,
+  revokeProjectInvite,
+  setupAccount
 } from "./api";
 import { AppShell } from "@/components/app-shell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ProjectsView } from "@/features/projects-view";
 import { PlansView } from "@/features/plans-view";
 import { StructureView } from "@/features/structure-view";
@@ -117,6 +128,13 @@ function shallowTreeFromEntries(rootPath, entries = []) {
 
 export default function App() {
   const initial = useMemo(() => initialSettings(), []);
+  const [authState, setAuthState] = useState({ checking: true, enabled: false, authenticated: false, setupRequired: false, user: null });
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [setupDisplayName, setSetupDisplayName] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState("");
+  const [inviteState, setInviteState] = useState({ token: "", invite: null, loading: false, error: "", accepted: null });
   const [tab, setTab] = useState("projects");
   const [form, setForm] = useState(emptyForm());
   const [projects, setProjects] = useState([]);
@@ -194,12 +212,47 @@ export default function App() {
   }, [codeSessions]);
   const selectedLatestJson = selectedLatestPlan?.plan_json || null;
   const sortedMilestones = useMemo(() => [...(selectedLatestJson?.milestones || [])].sort((a, b) => (a.week || 0) - (b.week || 0)), [selectedLatestJson]);
+  const inviteToken = useMemo(() => {
+    if (typeof window === "undefined") return "";
+    const match = window.location.pathname.match(/^\/invite\/([^/]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  }, []);
 
   useEffect(() => {
+    authStatus()
+      .then((status) => {
+        setAuthState({
+          checking: false,
+          enabled: Boolean(status.enabled),
+          authenticated: Boolean(status.authenticated),
+          setupRequired: Boolean(status.setupRequired),
+          user: status.user || null
+        });
+      })
+      .catch((e) => {
+        setAuthState({ checking: false, enabled: false, authenticated: true, setupRequired: false, user: null });
+        setError(e.message || "Could not check auth status");
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!inviteToken) return;
+    setInviteState((prev) => ({ ...prev, token: inviteToken, loading: true, error: "" }));
+    getInvite(inviteToken)
+      .then((invite) => {
+        setInviteState({ token: inviteToken, invite, loading: false, error: "", accepted: null });
+        setLoginEmail((current) => current || invite.email || "");
+      })
+      .catch((e) => setInviteState({ token: inviteToken, invite: null, loading: false, error: e.message || "Invite not found", accepted: null }));
+  }, [inviteToken]);
+
+  useEffect(() => {
+    if (authState.checking) return;
     checkConnection({ silent: false }).catch(() => null);
+    if (authState.enabled && !authState.authenticated) return;
     refreshProjects().catch((e) => setError(e.message));
     restoreCodeWorkerSessions().catch(() => setCodeSessionsHydrated(true));
-  }, []);
+  }, [authState.checking, authState.enabled, authState.authenticated]);
 
   useEffect(() => {
     const run = () => checkConnection({ silent: true }).catch(() => null);
@@ -319,6 +372,70 @@ export default function App() {
         latencyMs: null
       });
       return false;
+    }
+  }
+
+  async function submitLogin(event) {
+    event.preventDefault();
+    setLoginBusy(true);
+    setLoginError("");
+    try {
+      const result = authState.setupRequired
+        ? await setupAccount(loginEmail, loginPassword, setupDisplayName)
+        : await authLogin(loginEmail, loginPassword);
+      setLoginEmail("");
+      setLoginPassword("");
+      setSetupDisplayName("");
+      setAuthState({
+        checking: false,
+        enabled: Boolean(result.enabled),
+        authenticated: Boolean(result.authenticated),
+        setupRequired: Boolean(result.setupRequired),
+        user: result.user || null
+      });
+    } catch (e) {
+      setLoginError(e.message || "Login failed");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  async function logout() {
+    await authLogout().catch(() => null);
+    setProjects([]);
+    setSelectedProjectId(null);
+    setSelectedProject(null);
+    setAuthState({ checking: false, enabled: true, authenticated: false, setupRequired: false, user: null });
+  }
+
+  async function submitInviteAccept(event) {
+    event.preventDefault();
+    if (!inviteToken) return;
+    setLoginBusy(true);
+    setLoginError("");
+    try {
+      const payload = authState.authenticated ? {} : { password: loginPassword, displayName: setupDisplayName };
+      const result = await acceptInvite(inviteToken, payload);
+      setInviteState((prev) => ({ ...prev, accepted: result, error: "" }));
+      setLoginPassword("");
+      setSetupDisplayName("");
+      setAuthState({
+        checking: false,
+        enabled: true,
+        authenticated: true,
+        setupRequired: false,
+        user: result.user || null
+      });
+      await refreshProjects();
+      if (result.project?.id) {
+        setSelectedProjectId(result.project.id);
+        setCodeProjectId(result.project.id);
+        setAnalysisProjectId(result.project.id);
+      }
+    } catch (e) {
+      setLoginError(e.message || "Could not accept invite");
+    } finally {
+      setLoginBusy(false);
     }
   }
 
@@ -681,6 +798,22 @@ export default function App() {
     }
   }
 
+  async function loadProjectMembers(projectId) {
+    return getProjectMembers(projectId);
+  }
+
+  async function inviteProjectMember(projectId, email) {
+    return createProjectInvite(projectId, email);
+  }
+
+  async function removeProjectCollaborator(projectId, userId) {
+    return removeProjectMember(projectId, userId);
+  }
+
+  async function revokeProjectMemberInvite(projectId, inviteId) {
+    return revokeProjectInvite(projectId, inviteId);
+  }
+
   async function runCompare() {
     if (!selectedProjectId || !compareVersion) return;
     setCompareResult(await apiGet(`/projects/${selectedProjectId}/plans/compare?againstVersion=${compareVersion}`));
@@ -869,52 +1002,32 @@ export default function App() {
     }
   }
 
-  async function startCodeStructureWorker(payload = {}) {
-    if (!selectedCodeProject?.id || !selectedCodeProject?.root_path) {
-      setError("Select a project with a workspace root before creating structure.");
-      return null;
-    }
-    setError("");
-    setNotice("");
-    updateCodeSession(selectedCodeProject.id, {
-      busy: true,
-      logs: [],
-      restored: false,
-      terminalStatus: "connecting",
-      lastLogAt: null
-    });
-    try {
-      const job = await createCodeStructureJob(Number(selectedCodeProject.id), {
-        preset: "full_stack",
-        instructions: payload.instructions || ""
-      });
-      mergeJobIntoCodeSession(selectedCodeProject.id, job);
-      await loadCodeHistory(selectedCodeProject.id).catch(() => null);
-      const latest = await getCodeJob(job.id);
-      mergeJobIntoCodeSession(selectedCodeProject.id, latest);
-      return latest;
-    } catch (err) {
-      setError(err.message || "Failed to start structure workflow");
-      updateCodeSession(selectedCodeProject.id, {
-        busy: false,
-        terminalStatus: "idle"
-      });
-      return null;
-    }
-  }
-
   async function applyCurrentCodeJob() {
     if (!codeJob?.id) return;
-    const updated = await applyCodeJob(codeJob.id);
-    mergeJobIntoCodeSession(codeJobProjectId(updated) || codeProjectId, updated);
-    await loadCodeHistory(codeJobProjectId(updated) || codeProjectId).catch(() => null);
+    setError("");
+    setNotice("");
+    try {
+      const updated = await applyCodeJob(codeJob.id);
+      mergeJobIntoCodeSession(codeJobProjectId(updated) || codeProjectId, updated);
+      await loadCodeHistory(codeJobProjectId(updated) || codeProjectId).catch(() => null);
+      setNotice("Code proposal applied to the project files.");
+    } catch (err) {
+      setError(err.message || "Failed to accept code proposal");
+    }
   }
 
   async function rejectCurrentCodeJob() {
     if (!codeJob?.id) return;
-    const updated = await rejectCodeJob(codeJob.id);
-    mergeJobIntoCodeSession(codeJobProjectId(updated) || codeProjectId, updated);
-    await loadCodeHistory(codeJobProjectId(updated) || codeProjectId).catch(() => null);
+    setError("");
+    setNotice("");
+    try {
+      const updated = await rejectCodeJob(codeJob.id);
+      mergeJobIntoCodeSession(codeJobProjectId(updated) || codeProjectId, updated);
+      await loadCodeHistory(codeJobProjectId(updated) || codeProjectId).catch(() => null);
+      setNotice("Code proposal rejected.");
+    } catch (err) {
+      setError(err.message || "Failed to reject code proposal");
+    }
   }
 
   function resetCodeWorker() {
@@ -941,8 +1054,138 @@ export default function App() {
   };
   const title = titleMap[tab] || tab.charAt(0).toUpperCase() + tab.slice(1);
 
+  if (authState.checking) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background px-4">
+        <div className="workspace-panel w-full max-w-sm p-5">
+          <p className="text-sm font-semibold">KiraAI</p>
+          <p className="mt-1 text-sm text-muted-foreground">Checking secure session...</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (inviteToken) {
+    const invite = inviteState.invite;
+    const loggedInAsInviteEmail = authState.authenticated && invite?.email && authState.user?.email === invite.email;
+    const needsPassword = !authState.authenticated;
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background px-4">
+        <form onSubmit={submitInviteAccept} className="workspace-panel w-full max-w-md p-5">
+          <div className="mb-5">
+            <p className="text-sm font-semibold">KiraAI Project Invite</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {inviteState.loading ? "Loading invite..." : invite ? `Join ${invite.projectName} as ${invite.email}.` : "Invite could not be loaded."}
+            </p>
+          </div>
+          {inviteState.error ? (
+            <Alert className="mb-4 border-destructive/40 bg-destructive/10 text-destructive">
+              <AlertTitle>Invite unavailable</AlertTitle>
+              <AlertDescription>{inviteState.error}</AlertDescription>
+            </Alert>
+          ) : null}
+          {loginError ? (
+            <Alert className="mb-4 border-destructive/40 bg-destructive/10 text-destructive">
+              <AlertTitle>Accept failed</AlertTitle>
+              <AlertDescription>{loginError}</AlertDescription>
+            </Alert>
+          ) : null}
+          {inviteState.accepted ? (
+            <Alert className="state-success mb-4">
+              <AlertTitle>Invite accepted</AlertTitle>
+              <AlertDescription>You now have access to {inviteState.accepted.project?.name || "this project"}.</AlertDescription>
+            </Alert>
+          ) : null}
+          {invite?.expired ? (
+            <Alert className="mb-4 border-destructive/40 bg-destructive/10 text-destructive">
+              <AlertTitle>Expired</AlertTitle>
+              <AlertDescription>This invite link has expired.</AlertDescription>
+            </Alert>
+          ) : null}
+          {needsPassword ? (
+            <div className="grid gap-3">
+              <Input value={invite?.email || loginEmail} readOnly placeholder="Email" />
+              <Input
+                value={setupDisplayName}
+                onChange={(event) => setSetupDisplayName(event.target.value)}
+                placeholder="Display name"
+                autoComplete="name"
+              />
+              <Input
+                type="password"
+                autoComplete="new-password"
+                value={loginPassword}
+                onChange={(event) => setLoginPassword(event.target.value)}
+                placeholder="Create password"
+              />
+            </div>
+          ) : (
+            <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+              Signed in as {authState.user?.email}. {loggedInAsInviteEmail ? "Ready to accept." : "Sign out and log in with the invited email to accept this invite."}
+            </p>
+          )}
+          <Button
+            type="submit"
+            className="mt-4 w-full"
+            disabled={loginBusy || !invite || invite.expired || (!loggedInAsInviteEmail && authState.authenticated) || (needsPassword && !loginPassword)}
+          >
+            {loginBusy ? "Accepting..." : "Accept invite"}
+          </Button>
+        </form>
+      </main>
+    );
+  }
+
+  if (authState.enabled && !authState.authenticated) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background px-4">
+        <form onSubmit={submitLogin} className="workspace-panel w-full max-w-sm p-5">
+          <div className="mb-5">
+            <p className="text-sm font-semibold">{authState.setupRequired ? "Create KiraAI Admin" : "KiraAI Login"}</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {authState.setupRequired ? "Create the first admin account for this server." : "Sign in with your email and password."}
+            </p>
+          </div>
+          {loginError ? (
+            <Alert className="mb-4 border-destructive/40 bg-destructive/10 text-destructive">
+              <AlertTitle>Login failed</AlertTitle>
+              <AlertDescription>{loginError}</AlertDescription>
+            </Alert>
+          ) : null}
+          <div className="grid gap-3">
+            <Input
+              type="email"
+              autoComplete="email"
+              value={loginEmail}
+              onChange={(event) => setLoginEmail(event.target.value)}
+              placeholder="Email"
+            />
+            {authState.setupRequired ? (
+              <Input
+                autoComplete="name"
+                value={setupDisplayName}
+                onChange={(event) => setSetupDisplayName(event.target.value)}
+                placeholder="Display name"
+              />
+            ) : null}
+          <Input
+            type="password"
+              autoComplete={authState.setupRequired ? "new-password" : "current-password"}
+            value={loginPassword}
+            onChange={(event) => setLoginPassword(event.target.value)}
+              placeholder="Password"
+          />
+          </div>
+          <Button type="submit" className="mt-4 w-full" disabled={loginBusy || !loginEmail || !loginPassword}>
+            {loginBusy ? (authState.setupRequired ? "Creating..." : "Signing in...") : (authState.setupRequired ? "Create admin" : "Sign in")}
+          </Button>
+        </form>
+      </main>
+    );
+  }
+
   return (
-    <AppShell tab={tab} setTab={setTab} title={title} connectionStatus={connectionStatus} onRetryConnection={() => checkConnection({ silent: false })}>
+    <AppShell tab={tab} setTab={setTab} title={title} connectionStatus={connectionStatus} onRetryConnection={() => checkConnection({ silent: false })} authState={authState} onLogout={logout}>
       {error ? (
         <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
           <AlertTitle>Request failed</AlertTitle>
@@ -950,17 +1193,17 @@ export default function App() {
         </Alert>
       ) : null}
       {notice ? (
-        <Alert className="border-emerald-300 bg-emerald-50 text-emerald-900">
+        <Alert className="state-success">
           <AlertTitle>Success</AlertTitle>
           <AlertDescription>{notice}</AlertDescription>
         </Alert>
       ) : null}
-      {tab === "projects" ? <ProjectsView busy={busy} projects={projects} refreshProjects={refreshProjects} openProject={openProject} updateProjectRoot={updateProjectRoot} importExistingProject={importExistingProject} createWorkspaceProject={createWorkspaceProject} defaultTargetPath={settings.targetPath} performanceProjectId={performanceProjectId} performanceRuns={performanceRuns} performanceBusy={performanceBusy} loadProjectPerformanceRuns={loadProjectPerformanceRuns} /> : null}
+      {tab === "projects" ? <ProjectsView busy={busy} projects={projects} refreshProjects={refreshProjects} openProject={openProject} updateProjectRoot={updateProjectRoot} importExistingProject={importExistingProject} createWorkspaceProject={createWorkspaceProject} defaultTargetPath={settings.targetPath} performanceProjectId={performanceProjectId} performanceRuns={performanceRuns} performanceBusy={performanceBusy} loadProjectPerformanceRuns={loadProjectPerformanceRuns} loadProjectMembers={loadProjectMembers} inviteProjectMember={inviteProjectMember} removeProjectCollaborator={removeProjectCollaborator} revokeProjectMemberInvite={revokeProjectMemberInvite} currentUser={authState.user} /> : null}
       {tab === "plans" ? <PlansView selectedProjectId={selectedProjectId} selectedLatestJson={selectedLatestJson} selectedLatestPlan={selectedLatestPlan} sortedMilestones={sortedMilestones} settings={settings} refreshSelectedProject={refreshSelectedProject} loadHistory={loadHistory} updateFeedback={updateFeedback} promoteBaseline={promoteBaseline} historyFilter={historyFilter} setHistoryFilter={setHistoryFilter} historyRows={historyRows} compareVersion={compareVersion} setCompareVersion={setCompareVersion} runCompare={runCompare} compareResult={compareResult} generatePlan={generatePlan} /> : null}
       {tab === "structure" ? <StructureView settings={settings} setSettings={setSettings} runStructure={runStructure} selectedProjectId={selectedProjectId} structureResult={structureResult} /> : null}
       {tab === "explorer" ? <ExplorerView parentPath={parentPath} loadExplorer={loadExplorer} navigateExplorer={navigateExplorer} goBack={goExplorerBack} goForward={goExplorerForward} canGoBack={explorerBackStack.length > 0} canGoForward={explorerForwardStack.length > 0} currentPath={currentPath} entries={entries} tree={tree} openEntry={openEntry} selectedPaths={selectedPaths} toggleSelect={toggleSelect} openFilePath={openFilePath} setOpenFilePath={setOpenFilePath} openFileContent={openFileContent} setOpenFileContent={setOpenFileContent} dirtyFile={dirtyFile} setDirtyFile={setDirtyFile} saveFile={saveFile} fsConnected={fsConnected} createFolder={createFolder} createFile={createFile} renameSelected={renameSelected} deleteSelected={deleteSelected} copySelected={copySelected} moveSelected={moveSelected} filter={filter} setFilter={setFilter} /> : null}
       {tab === "analyzer" ? <AnalyzerView projects={projects} selectedProjectId={analysisProjectId} setSelectedProjectId={setAnalysisProjectId} runCodebaseSummary={runCodebaseSummary} analysisBusy={analysisBusy} analysisJob={analysisJob} analysisResult={analysisResult} projectSummaries={projectSummaries} loadProjectSummaries={loadProjectSummaries} setAnalysisResult={(data) => setAnalysisResult(normalizeSummaryResult(data))} setError={setError} getSummaryById={getSummaryById} /> : null}
-      {tab === "code" ? <CodeWorkerView projects={projects} sessionsByProject={codeSessions} selectedProject={selectedCodeProject} selectedProjectId={codeProjectId} setSelectedProjectId={setCodeProjectId} codePrompt={codePrompt} setCodePrompt={setCurrentCodePrompt} codeMode={codeMode} setCodeMode={setCurrentCodeMode} codeJob={codeJob} codeBusy={codeBusy} codeLogs={codeLogs} terminalStatus={codeTerminalStatus} lastLogAt={codeLastLogAt} learningProfile={codeLearningProfile} codeSessionRestored={codeSessionRestored} codeHistory={codeHistory} codeHistoryBusy={codeHistoryBusy} loadCodeHistory={loadCodeHistory} openCodeHistoryJob={openCodeHistoryJob} startCodeWorker={startCodeWorker} startCodeStructureWorker={startCodeStructureWorker} applyCurrentCodeJob={applyCurrentCodeJob} rejectCurrentCodeJob={rejectCurrentCodeJob} resetCodeWorker={resetCodeWorker} /> : null}
+      {tab === "code" ? <CodeWorkerView projects={projects} sessionsByProject={codeSessions} selectedProject={selectedCodeProject} selectedProjectId={codeProjectId} setSelectedProjectId={setCodeProjectId} codePrompt={codePrompt} setCodePrompt={setCurrentCodePrompt} codeMode={codeMode} setCodeMode={setCurrentCodeMode} codeJob={codeJob} codeBusy={codeBusy} codeLogs={codeLogs} terminalStatus={codeTerminalStatus} lastLogAt={codeLastLogAt} learningProfile={codeLearningProfile} codeSessionRestored={codeSessionRestored} codeHistory={codeHistory} codeHistoryBusy={codeHistoryBusy} loadCodeHistory={loadCodeHistory} openCodeHistoryJob={openCodeHistoryJob} startCodeWorker={startCodeWorker} applyCurrentCodeJob={applyCurrentCodeJob} rejectCurrentCodeJob={rejectCurrentCodeJob} resetCodeWorker={resetCodeWorker} /> : null}
       {tab === "settings" ? <SettingsView settings={settings} setSettings={setSettings} savedDefaultPath={savedDefaultPath} saveDefaultSettings={saveDefaultSettings} /> : null}
     </AppShell>
   );

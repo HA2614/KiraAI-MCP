@@ -35,14 +35,14 @@ export function PlansView(props) {
           <CardContent className="space-y-4">
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {sortedMilestones.map((m, i) => (
-                <Card key={i} className="bg-secondary/30">
-                  <CardHeader className="p-4">
-                    <CardTitle className="text-base">Week {m.week}: {m.name}</CardTitle>
-                  </CardHeader>
-                  <CardContent className="p-4 pt-0">
+                <div key={i} className="rounded-lg border border-border/70 bg-secondary/25">
+                  <div className="p-4">
+                    <h3 className="text-base font-semibold">Week {m.week}: {m.name}</h3>
+                  </div>
+                  <div className="p-4 pt-0">
                     <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">{(m.deliverables || []).map((d, j) => <li key={j}>{d}</li>)}</ul>
-                  </CardContent>
-                </Card>
+                  </div>
+                </div>
               ))}
             </div>
             <div className="flex flex-wrap gap-2">

@@ -18,6 +18,8 @@ export function startCodebaseSummaryJob(targetPath, options = {}) {
     stage: "queued",
     message: "Queued",
     createdAt: nowIso(),
+    targetPath,
+    projectId: options.projectId || null,
     startedAt: null,
     finishedAt: null,
     elapsedMs: 0,
