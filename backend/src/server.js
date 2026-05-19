@@ -66,10 +66,12 @@ app.use(helmet({
       baseUri: ["'self'"],
       objectSrc: ["'none'"],
       scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
       imgSrc: ["'self'", "data:", "blob:"],
       connectSrc: ["'self'"],
-      frameAncestors: ["'none'"]
+      frameAncestors: ["'none'"],
+      upgradeInsecureRequests: null
     }
   },
   crossOriginEmbedderPolicy: false
