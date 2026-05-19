@@ -52,6 +52,7 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
   const [debugResult, setDebugResult] = useState(null);
   const [debugBusy, setDebugBusy] = useState(false);
   const [showArchivedSources, setShowArchivedSources] = useState(false);
+  const [sourceDeleteScope, setSourceDeleteScope] = useState("all");
 
   const activeJobIds = useMemo(
     () => jobs.filter((job) => ACTIVE_JOB_STATUSES.has(job.status)).map((job) => job.id).sort((a, b) => a - b),
@@ -213,6 +214,30 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
   async function deleteSource(id) {
     await apiDelete(`/ml/sources/${id}`);
     await refreshMlPanel({ silent: true });
+  }
+
+  async function deleteSourcesBulk() {
+    const labels = {
+      all: "all sources",
+      active: "active sources",
+      archived: "archived sources"
+    };
+    const label = labels[sourceDeleteScope] || "sources";
+    if (!window.confirm(`Delete ${label}? Learned skills stay available, but source records, documents, chunks, and learning jobs for this scope will be removed.`)) {
+      return;
+    }
+    setMlBusy(true);
+    setMlError("");
+    setMlNotice("");
+    try {
+      const result = await apiDelete("/ml/sources", { data: { scope: sourceDeleteScope }, timeout: 45000 });
+      setMlNotice(`Deleted ${result.deleted || 0} ${label}.`);
+      await refreshMlPanel({ silent: true });
+    } catch (error) {
+      setMlError(error.message || "Failed to delete sources");
+    } finally {
+      setMlBusy(false);
+    }
   }
 
   async function cancelJob(id) {
@@ -422,6 +447,22 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
                     <RefreshCcw className="mr-2 h-4 w-4" />
                     Refresh
                   </Button>
+                  <div className="flex rounded-md border border-destructive/30 bg-destructive/10 p-1">
+                    <Select value={sourceDeleteScope} onValueChange={setSourceDeleteScope}>
+                      <SelectTrigger className="h-9 w-[132px] border-0 bg-transparent text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All sources</SelectItem>
+                        <SelectItem value="active">Active only</SelectItem>
+                        <SelectItem value="archived">Archived only</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button variant="destructive" size="sm" onClick={deleteSourcesBulk} disabled={mlBusy}>
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Delete
+                    </Button>
+                  </div>
                 </div>
               </div>
             </CardHeader>

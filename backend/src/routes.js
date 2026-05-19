@@ -55,6 +55,7 @@ import {
   debugMindQuery,
   deleteSkill,
   deleteSource,
+  deleteSourcesBulk,
   getLearningJob,
   getMlStatus,
   getSkill,
@@ -233,6 +234,9 @@ const mlPatchSchema = z.object({
   enabled: z.boolean().optional(),
   name: z.string().optional()
 });
+const mlSourcesDeleteSchema = z.object({
+  scope: z.enum(["all", "active", "archived"]).optional().default("all")
+});
 const mlSkillPatchSchema = z.object({
   enabled: z.boolean().optional()
 });
@@ -392,6 +396,14 @@ router.patch("/ml/sources/:id", (req, res) =>
     const parsed = mlPatchSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid ML source patch", parsed.error.flatten());
     return ok(res, await updateSource(id, parsed.data));
+  })
+);
+
+router.delete("/ml/sources", (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = mlSourcesDeleteSchema.safeParse(req.body || {});
+    if (!parsed.success) throw new ValidationError("Invalid ML source delete payload", parsed.error.flatten());
+    return ok(res, await deleteSourcesBulk(parsed.data));
   })
 );
 

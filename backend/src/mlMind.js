@@ -1619,6 +1619,38 @@ export async function deleteSource(sourceId) {
   return { deleted: true, id: Number(sourceId) };
 }
 
+export async function deleteSourcesBulk({ scope = "all" } = {}) {
+  const normalizedScope = String(scope || "all").trim().toLowerCase();
+  if (!["all", "active", "archived"].includes(normalizedScope)) {
+    throw new ValidationError("source delete scope must be all, active, or archived");
+  }
+
+  const where =
+    normalizedScope === "active"
+      ? "archived=FALSE"
+      : normalizedScope === "archived"
+        ? "archived=TRUE"
+        : "TRUE";
+
+  const running = await query(
+    `SELECT COUNT(*)::int AS count
+     FROM ml_learning_jobs j
+     JOIN ml_sources s ON s.id=j.source_id
+     WHERE j.status IN ('queued','running') AND ${where}`
+  );
+  const runningCount = Number(running.rows[0]?.count || 0);
+  if (runningCount > 0) {
+    throw new ValidationError(`Cancel ${runningCount} active learning job(s) before deleting these sources`);
+  }
+
+  const deleted = await query(`DELETE FROM ml_sources WHERE ${where} RETURNING id`);
+  return {
+    deleted: deleted.rowCount,
+    ids: deleted.rows.map((row) => Number(row.id)),
+    scope: normalizedScope
+  };
+}
+
 export async function startLearningJob(sourceId) {
   const source = await getSource(sourceId);
   if (!source.enabled) throw new ValidationError("Enable this ML source before starting learning");
