@@ -27,7 +27,7 @@ ENV NODE_ENV=production
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates bubblewrap git gosu ripgrep \
   && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /home/node/.codex /workspace
+  && mkdir -p /home/node/.codex /home/node/.claude /workspace
 COPY --chown=node:node package.json package-lock.json ./
 COPY --chown=node:node backend/package.json backend/package.json
 COPY --chown=node:node --from=prod-deps /app/node_modules ./node_modules
@@ -36,7 +36,7 @@ COPY --chown=node:node desktop ./desktop
 COPY --chown=node:node --from=build /app/frontend/dist ./frontend/dist
 COPY --chown=root:root backend/docker-entrypoint.sh ./backend/docker-entrypoint.sh
 RUN chmod +x ./backend/docker-entrypoint.sh \
-  && chown -R node:node /home/node/.codex /workspace
+  && chown -R node:node /home/node/.codex /home/node/.claude /workspace
 ENTRYPOINT ["./backend/docker-entrypoint.sh"]
 EXPOSE 4000
 CMD ["sh", "-c", "node backend/src/migrate.js && node backend/src/server.js"]

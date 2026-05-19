@@ -294,7 +294,7 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
             <label className="text-sm">Provider</label>
             <Select value={settings.provider} onValueChange={(v) => setSettings({ ...settings, provider: v })}>
               <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>{["codex_cli", "openai", "anthropic"].map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}</SelectContent>
+              <SelectContent>{["codex_cli", "claude_cli", "openai", "anthropic"].map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}</SelectContent>
             </Select>
             <label className="text-sm">Default target path</label>
             <div className="flex flex-wrap gap-2">

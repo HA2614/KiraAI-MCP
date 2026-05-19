@@ -3,6 +3,7 @@ set -eu
 
 APP_USER="${APP_USER:-node}"
 CODEX_DIR="${CODEX_HOME:-/home/node/.codex}"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-/home/node/.claude}"
 WORKSPACE_DIR="${FS_BASE_PATH:-/workspace}"
 
 repair_dir() {
@@ -72,7 +73,35 @@ repair_codex_home() {
   fi
 }
 
+claude_home_usable() {
+  env KIRAAI_CLAUDE_HOME="$CLAUDE_DIR" gosu "$APP_USER" sh -c '
+    mkdir -p "$KIRAAI_CLAUDE_HOME" &&
+    touch "$KIRAAI_CLAUDE_HOME/.kiraai-write-test" &&
+    rm -f "$KIRAAI_CLAUDE_HOME/.kiraai-write-test"
+  ' 2>/dev/null
+}
+
+repair_claude_home() {
+  mkdir -p "$CLAUDE_DIR"
+  if claude_home_usable; then
+    return 0
+  fi
+
+  repair_dir "$CLAUDE_DIR" "Claude Code home"
+
+  if ! claude_home_usable; then
+    chmod -R a+rwX "$CLAUDE_DIR" 2>/dev/null || true
+  fi
+
+  if ! claude_home_usable; then
+    echo "Fatal: Claude Code home is not usable by $APP_USER: $CLAUDE_DIR" >&2
+    echo "Fix the host path from .env CLAUDE_HOME_HOST or choose a writable Claude config directory." >&2
+    exit 1
+  fi
+}
+
 check_writable_dir "$WORKSPACE_DIR" "Workspace"
 repair_codex_home
+repair_claude_home
 
 exec gosu "$APP_USER" "$@"

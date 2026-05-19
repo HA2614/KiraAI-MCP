@@ -132,7 +132,7 @@ async function generatePlanFlow() {
       type: "list",
       name: "provider",
       message: "Provider",
-      choices: ["codex_cli", "openai", "anthropic"]
+      choices: ["codex_cli", "claude_cli", "openai", "anthropic"]
     }
   ]);
 

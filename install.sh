@@ -5,6 +5,8 @@ IFS=$'\n\t'
 KIRAAI_REPO_URL="${KIRAAI_REPO_URL:-https://github.com/HA2614/KiraAI-MCP.git}"
 KIRAAI_BRANCH="${KIRAAI_BRANCH:-main}"
 KIRAAI_SKIP_CODEX_LOGIN="${KIRAAI_SKIP_CODEX_LOGIN:-0}"
+KIRAAI_SKIP_CLAUDE_LOGIN="${KIRAAI_SKIP_CLAUDE_LOGIN:-0}"
+KIRAAI_CODE_AGENT_PROVIDER="${KIRAAI_CODE_AGENT_PROVIDER:-}"
 KIRAAI_PROFILE="${KIRAAI_PROFILE:-local}"
 KIRAAI_BIND_HOST="${KIRAAI_BIND_HOST:-}"
 KIRAAI_PUBLIC_URL="${KIRAAI_PUBLIC_URL:-}"
@@ -294,6 +296,13 @@ write_env() {
   set_env_value .env HOST_WORKSPACE_ROOT "./workspace"
   set_env_value .env CONTAINER_FS_ROOT "/workspace"
   set_env_value .env CODEX_HOME_HOST "./.codex-host"
+  set_env_value .env CLAUDE_HOME_HOST "./.claude-host"
+  if [[ -n "$KIRAAI_CODE_AGENT_PROVIDER" ]]; then
+    set_env_value .env CODE_AGENT_PROVIDER "$KIRAAI_CODE_AGENT_PROVIDER"
+    set_env_value .env AI_PROVIDER "$KIRAAI_CODE_AGENT_PROVIDER"
+  elif [[ -z "$(env_file_value .env CODE_AGENT_PROVIDER)" ]]; then
+    set_env_value .env CODE_AGENT_PROVIDER "codex_cli"
+  fi
   set_env_value .env IMAGE_PROVIDER "codex_cli"
   set_env_value .env IMAGE_CODEX_SANDBOX "workspace-write"
   set_env_value .env ML_ALLOW_PRIVATE_NETWORK_FETCHES "false"
@@ -337,6 +346,7 @@ write_env() {
     set_env_value .env APP_USER "node"
     set_env_value .env CODE_JOB_SANDBOX "workspace-write"
     set_env_value .env CODEX_SUMMARY_SANDBOX "read-only"
+    set_env_value .env CLAUDE_PERMISSION_MODE "acceptEdits"
     echo "Production profile enabled. App port binds to ${KIRAAI_BIND_HOST:-127.0.0.1}; use a reverse proxy/TLS for public access when internet-facing."
   else
     set_env_value .env APP_BIND_HOST "${KIRAAI_BIND_HOST:-0.0.0.0}"
@@ -345,14 +355,15 @@ write_env() {
     set_env_value .env APP_USER "root"
     set_env_value .env CODE_JOB_SANDBOX "danger-full-access"
     set_env_value .env CODEX_SUMMARY_SANDBOX "danger-full-access"
+    set_env_value .env CLAUDE_PERMISSION_MODE "bypassPermissions"
   fi
 }
 
 create_runtime_dirs() {
   cd "$PROJECT_DIR"
-  mkdir -p workspace .codex-host
-  "${SUDO_CMD[@]}" chown -R "$(id -u):$(id -g)" workspace .codex-host 2>/dev/null || true
-  chmod -R u+rwX workspace .codex-host
+  mkdir -p workspace .codex-host .claude-host
+  "${SUDO_CMD[@]}" chown -R "$(id -u):$(id -g)" workspace .codex-host .claude-host 2>/dev/null || true
+  chmod -R u+rwX workspace .codex-host .claude-host
 }
 
 build_app_image() {
@@ -427,6 +438,35 @@ codex_device_login() {
 
   echo "Codex device-auth login will open now. Finish login in the browser, then return here."
   docker_compose run --rm -it app /app/node_modules/.bin/codex login --device-auth
+}
+
+claude_code_login() {
+  cd "$PROJECT_DIR"
+
+  if [[ "$KIRAAI_SKIP_CLAUDE_LOGIN" == "1" ]]; then
+    echo "Skipping Claude Code login because KIRAAI_SKIP_CLAUDE_LOGIN=1."
+    return 0
+  fi
+
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    fail "Claude Code login needs an interactive terminal. Use: bash <(curl -fsSL https://raw.githubusercontent.com/HA2614/KiraAI-MCP/main/install.sh)"
+  fi
+
+  echo "Claude Code login will open now. Use Claude.ai/Pro/Max/Team login when prompted, then exit Claude after login completes."
+  docker_compose run --rm -it app /app/node_modules/.bin/claude auth login
+}
+
+code_agent_login() {
+  local provider
+  provider="$(env_file_value "$PROJECT_DIR/.env" CODE_AGENT_PROVIDER)"
+  case "$provider" in
+    claude|claude_cli|claude_code)
+      claude_code_login
+      ;;
+    *)
+      codex_device_login
+      ;;
+  esac
 }
 
 start_services() {
@@ -513,7 +553,7 @@ main() {
   run_step "Create runtime directories" create_runtime_dirs
   run_step "Build KiraAI app image" build_app_image
   run_step "Configure production auth" configure_production_auth
-  run_step "Codex device-auth login" codex_device_login
+  run_step "AI CLI login" code_agent_login
   run_step "Start Docker Compose services" start_services
   run_step "Verify KiraAI health" verify_app
   finish_message

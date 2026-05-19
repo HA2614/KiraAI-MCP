@@ -26,7 +26,7 @@ async function waitForJob(getCodeJob, jobId) {
 async function main() {
   const { config } = await import("../config.js");
   const { pool } = await import("../db.js");
-  const { applyCodeJob, buildCodeResponseMarkdown, detectCodeJobWorkflow, getCodeJob, getCodeJobAsset, shouldUseStructureWorkflow, startCodeJob } = await import("../codeJobs.js");
+  const { applyCodeJob, buildCodeResponseMarkdown, detectCodeJobWorkflow, getCodeJob, getCodeJobAsset, resolveCodeAgentProvider, shouldUseStructureWorkflow, startCodeJob } = await import("../codeJobs.js");
   const { resolveImageProvider, shouldGenerateImage } = await import("../imageGeneration.js");
   const { router } = await import("../routes.js");
 
@@ -65,6 +65,8 @@ async function main() {
     assert(shouldGenerateImage({ prompt: "refactor component", responseMode: "image" }) === true, "Image mode should force image responses");
     assert(shouldGenerateImage({ prompt: "maak een foto", responseMode: "auto" }) === true, "Auto mode should still detect visual prompts");
     assert(shouldUseStructureWorkflow("maak een full-stack structure met frontend backend api database docker"), "Full-stack structure prompt should be detected");
+    assert(resolveCodeAgentProvider("claude") === "claude_cli", "Claude provider aliases should resolve to claude_cli");
+    assert(resolveCodeAgentProvider("codex") === "codex_cli", "Codex provider aliases should resolve to codex_cli");
     assert(detectCodeJobWorkflow({ prompt: "maak een full-stack structure met frontend backend api database docker", responseMode: "auto" }) === "structure", "Auto mode should detect structure workflow");
     assert(detectCodeJobWorkflow({ prompt: "fix button styling", responseMode: "auto" }) === "code", "Plain code prompt should stay a code workflow");
     assert(detectCodeJobWorkflow({ prompt: "maak een full-stack structure", responseMode: "image" }) === "image", "Image mode should force image workflow");

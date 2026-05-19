@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { config } from "./config.js";
 import { resolveCodexBinary } from "./codexBinary.js";
+import { resolveClaudeBinary } from "./claudeBinary.js";
 import { ExternalServiceError } from "./errors.js";
 import { logWarn } from "./logger.js";
 import { validatePlanOrThrow } from "./planSchema.js";
@@ -47,9 +48,16 @@ Project details:
 }
 
 function providerChain(providerOverride) {
-  if (providerOverride) return [providerOverride];
+  if (providerOverride) return [normalizeProvider(providerOverride)];
   const chain = [config.aiProvider, ...config.aiFallbackProviders].filter(Boolean);
-  return [...new Set(chain)];
+  return [...new Set(chain.map(normalizeProvider))];
+}
+
+function normalizeProvider(provider) {
+  const value = String(provider || "").trim().toLowerCase();
+  if (value === "claude" || value === "claude_code") return "claude_cli";
+  if (value === "codex" || value === "openai_codex") return "codex_cli";
+  return value;
 }
 
 export async function generatePlan(project, providerOverride) {
@@ -92,6 +100,10 @@ async function generateByProvider(project, provider) {
     return await generatePlanWithCodexCli(project);
   }
 
+  if (provider === "claude_cli") {
+    return await generatePlanWithClaudeCli(project);
+  }
+
   if (provider === "anthropic") {
     if (!anthropic) throw new ExternalServiceError("ANTHROPIC_API_KEY is missing", null, "ANTHROPIC_NOT_CONFIGURED");
     const msg = await anthropic.messages.create({
@@ -127,6 +139,71 @@ async function generateByProvider(project, provider) {
 
   const content = completion.choices[0]?.message?.content || "{}";
   return parsePlanJson(content);
+}
+
+async function generatePlanWithClaudeCli(project) {
+  const prompt = `${buildPrompt(project)}
+
+Output only JSON with no markdown fences and no additional commentary.`;
+
+  const tempDir = await mkdtemp(path.join(tmpdir(), "mcp-plan-claude-"));
+  const args = [
+    "-p",
+    "--output-format",
+    "text",
+    "--input-format",
+    "text",
+    "--permission-mode",
+    "plan",
+    "--max-turns",
+    String(config.claudeMaxTurns),
+    "--no-session-persistence"
+  ];
+  if (config.claudeModel) args.push("--model", config.claudeModel);
+
+  const claudeBin = await resolveClaudeBinary();
+  try {
+    const output = await new Promise((resolve, reject) => {
+      const child = spawn(claudeBin, args, {
+        cwd: tempDir,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          CLAUDE_CONFIG_DIR: config.claudeConfigDir || process.env.CLAUDE_CONFIG_DIR || "/home/node/.claude",
+          CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
+          DISABLE_AUTOUPDATER: "1",
+          ANTHROPIC_API_KEY: undefined
+        }
+      });
+      child.stdin.end(prompt);
+
+      let stdout = "";
+      let stderr = "";
+      const timer = setTimeout(() => {
+        child.kill("SIGTERM");
+        reject(new ExternalServiceError(`claude exec timed out after ${config.codexTimeoutMs}ms`, null, "CLAUDE_TIMEOUT"));
+      }, config.codexTimeoutMs);
+
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on("error", (error) => reject(new ExternalServiceError(error.message, null, "CLAUDE_PROCESS_ERROR")));
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          resolve(stdout);
+          return;
+        }
+        reject(new ExternalServiceError(`claude exec failed (code ${code})`, { stderr: stderr.trim() }, "CLAUDE_EXIT_NON_ZERO"));
+      });
+    });
+    return parsePlanJson(output);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 }
 
 async function generatePlanWithCodexCli(project) {

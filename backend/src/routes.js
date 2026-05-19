@@ -107,7 +107,7 @@ const feedbackSchema = z.object({
   modifiedPlan: z.any().optional()
 });
 
-const providerSchema = z.enum(["codex_cli", "openai", "anthropic"]).optional();
+const providerSchema = z.enum(["codex_cli", "claude_cli", "openai", "anthropic"]).optional();
 const structureSchema = z.object({
   targetPath: z.string().min(1),
   profile: z.enum(["web+api", "web", "api", "docs-only"]).optional().default("web+api"),

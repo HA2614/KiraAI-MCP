@@ -9,6 +9,7 @@ import { AppError, ExternalServiceError, NotFoundError, RateLimitError, Validati
 import { getLearningProfile } from "./analysisStore.js";
 import { buildMindContextForPrompt } from "./mlMind.js";
 import { resolveCodexBinary } from "./codexBinary.js";
+import { resolveClaudeBinary } from "./claudeBinary.js";
 import { fsDelete, fsWriteFile, resolveExistingSafePath, resolveSafePath } from "./structure.js";
 import { createRunTimer, finishTimingSnapshot } from "./performanceTiming.js";
 import { generateImageAsset, normalizeSvgAssetContent, resolveImageProvider, shouldGenerateImage } from "./imageGeneration.js";
@@ -480,10 +481,22 @@ function shouldKeepCodexLogLine(line) {
   );
 }
 
-function codeJobCodexExitError(code, stderr = "", stdout = "") {
+export function resolveCodeAgentProvider(value = config.codeAgentProvider) {
+  const provider = String(value || "codex_cli").trim().toLowerCase();
+  if (provider === "claude" || provider === "claude_code" || provider === "claude_cli") return "claude_cli";
+  if (provider === "codex" || provider === "openai_codex" || provider === "codex_cli") return "codex_cli";
+  return "codex_cli";
+}
+
+function codeAgentLabel(provider = resolveCodeAgentProvider()) {
+  return provider === "claude_cli" ? "Claude Code" : "Codex";
+}
+
+function codeJobCliExitError(provider, code, stderr = "", stdout = "") {
   const compactStderr = stderr.trim();
   const compactStdout = stdout.trim();
   const lower = `${compactStderr}\n${compactStdout}`.toLowerCase();
+  const label = codeAgentLabel(provider);
   if (
     lower.includes("cannot access session files") ||
     (lower.includes(".codex") && lower.includes("permission denied"))
@@ -494,10 +507,24 @@ function codeJobCodexExitError(code, stderr = "", stdout = "") {
       "CODEX_HOME_PERMISSION_DENIED"
     );
   }
+  if (provider === "claude_cli" && (lower.includes(".claude") || lower.includes("claude_config_dir")) && lower.includes("permission denied")) {
+    return new ExternalServiceError(
+      "KiraAI cannot access the Claude Code config directory. Restart the Docker app so startup permission repair can run, or fix CLAUDE_HOME_HOST ownership.",
+      { stderr: compactStderr, stdout: compactStdout },
+      "CLAUDE_HOME_PERMISSION_DENIED"
+    );
+  }
+  if (provider === "claude_cli" && (lower.includes("login") || lower.includes("auth") || lower.includes("credentials"))) {
+    return new ExternalServiceError(
+      "Claude Code is not logged in inside the KiraAI container. Run the Claude login step again, then retry the job.",
+      { stderr: compactStderr, stdout: compactStdout },
+      "CLAUDE_LOGIN_REQUIRED"
+    );
+  }
   return new ExternalServiceError(
-    `KiraAI code job failed (code ${code})`,
+    `${label} code job failed (code ${code})`,
     { stderr: compactStderr, stdout: compactStdout },
-    "CODE_JOB_CODEX_NON_ZERO"
+    provider === "claude_cli" ? "CODE_JOB_CLAUDE_NON_ZERO" : "CODE_JOB_CODEX_NON_ZERO"
   );
 }
 
@@ -1088,6 +1115,8 @@ async function collectWorkspaceChanges(beforeSnapshot, workDir) {
 }
 
 async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
+  const provider = resolveCodeAgentProvider();
+  const agentLabel = codeAgentLabel(provider);
   const tempDir = await mkdtemp(path.join(tmpdir(), "mcp-code-job-"));
   const workDir = path.join(tempDir, "workspace");
   const outputFile = path.join(tempDir, "codex-summary.txt");
@@ -1103,43 +1132,75 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
   const beforeSnapshot = await snapshotWorkspace(workDir, { includeContent: true });
   await appendLog(jobId, "Isolated workspace ready", { durationMs: Date.now() - copyStartedAt });
   if (timer) {
-    await markCodeJobStage(jobId, timer, "codex_cli", {
-      model: config.codeAiModel,
-      reasoningEffort: config.codeJobReasoningEffort
+    await markCodeJobStage(jobId, timer, provider, {
+      model: provider === "claude_cli" ? config.claudeModel : config.codeAiModel,
+      reasoningEffort: provider === "claude_cli" ? undefined : config.codeJobReasoningEffort
     });
   }
-  const codexBin = await resolveCodexBinary();
-  const args = [
-    "--ask-for-approval",
-    "never",
-    "exec",
-    "--sandbox",
-    config.codeJobSandbox,
-    "--ephemeral",
-    "--ignore-user-config",
-    "--ignore-rules",
-    "-c",
-    `model_reasoning_effort="${config.codeJobReasoningEffort}"`,
-    "--skip-git-repo-check",
-    "--output-last-message",
-    outputFile
-  ];
-  if (config.codeAiModel) args.push("--model", config.codeAiModel);
-  args.push("-");
+  let agentBin = "";
+  let args = [];
+  if (provider === "claude_cli") {
+    agentBin = await resolveClaudeBinary();
+    args = [
+      "-p",
+      "--output-format",
+      "text",
+      "--input-format",
+      "text",
+      "--permission-mode",
+      config.claudePermissionMode,
+      "--max-turns",
+      String(config.claudeMaxTurns),
+      "--no-session-persistence"
+    ];
+    if (config.claudeModel) args.push("--model", config.claudeModel);
+  } else {
+    agentBin = await resolveCodexBinary();
+    args = [
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--sandbox",
+      config.codeJobSandbox,
+      "--ephemeral",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "-c",
+      `model_reasoning_effort="${config.codeJobReasoningEffort}"`,
+      "--skip-git-repo-check",
+      "--output-last-message",
+      outputFile
+    ];
+    if (config.codeAiModel) args.push("--model", config.codeAiModel);
+    args.push("-");
+  }
 
-  await appendLog(jobId, "KiraAI engine started", {
-    model: config.codeAiModel,
-    reasoningEffort: config.codeJobReasoningEffort,
-    sandbox: config.codeJobSandbox,
+  await appendLog(jobId, `${agentLabel} engine started`, {
+    provider,
+    model: provider === "claude_cli" ? config.claudeModel : config.codeAiModel,
+    reasoningEffort: provider === "claude_cli" ? undefined : config.codeJobReasoningEffort,
+    sandbox: provider === "claude_cli" ? config.claudePermissionMode : config.codeJobSandbox,
     timeoutMs: config.codeJobTimeoutMs
   });
 
   try {
-    const codexStartedAt = Date.now();
+    const agentStartedAt = Date.now();
+    let agentSummary = "";
     await new Promise((resolve, reject) => {
-      const child = spawn(codexBin, args, {
+      const child = spawn(agentBin, args, {
         cwd: workDir,
-        stdio: ["pipe", "pipe", "pipe"]
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          ...(provider === "claude_cli"
+            ? {
+                CLAUDE_CONFIG_DIR: config.claudeConfigDir || process.env.CLAUDE_CONFIG_DIR || "/home/node/.claude",
+                CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
+                DISABLE_AUTOUPDATER: "1",
+                ANTHROPIC_API_KEY: undefined
+              }
+            : {})
+        }
       });
       child.stdin.end(prompt);
 
@@ -1194,6 +1255,7 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
 
       child.stdout.on("data", (chunk) => {
         stdout += chunk.toString();
+        if (provider === "claude_cli") agentSummary += chunk.toString();
         flushLines("stdout", chunk);
       });
       child.stderr.on("data", (chunk) => {
@@ -1218,16 +1280,20 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
           finish();
           return;
         }
-        finish(codeJobCodexExitError(code, stderr, stdout));
+        finish(codeJobCliExitError(provider, code, stderr, stdout));
       });
     });
-    await appendLog(jobId, "KiraAI engine finished", { durationMs: Date.now() - codexStartedAt });
+    await appendLog(jobId, `${agentLabel} engine finished`, { durationMs: Date.now() - agentStartedAt });
 
     let codexSummary = "";
-    try {
-      codexSummary = await readFile(outputFile, "utf8");
-    } catch {
-      codexSummary = "";
+    if (provider === "claude_cli") {
+      codexSummary = agentSummary.trim();
+    } else {
+      try {
+        codexSummary = await readFile(outputFile, "utf8");
+      } catch {
+        codexSummary = "";
+      }
     }
     const collectStartedAt = Date.now();
     if (timer) await markCodeJobStage(jobId, timer, "collect_changes");

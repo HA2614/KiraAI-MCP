@@ -6,8 +6,8 @@ It runs as a Docker Compose app with:
 
 - React frontend and Express backend
 - PostgreSQL with pgvector
-- Redis sessions and job state
-- Codex CLI for AI/code execution
+- Redis job/cache state
+- Codex CLI or Claude Code CLI for AI/code execution
 - KiraAI Learning for reusable skills and source knowledge
 - Reviewable code proposals with Accept/Reject
 - Multi-user projects with invite links
@@ -32,7 +32,7 @@ Local/dev install:
 bash <(curl -fsSL https://raw.githubusercontent.com/HA2614/KiraAI-MCP/main/install.sh)
 ```
 
-The installer checks Ubuntu, installs Docker if needed, clones or updates the repo, writes the `.env`, runs Codex device login, builds the app, starts Docker Compose, and verifies `/api/health`.
+The installer checks Ubuntu, installs Docker if needed, clones or updates the repo, writes the `.env`, runs the selected AI CLI login, builds the app, starts Docker Compose, and verifies `/api/health`.
 
 Production profile enables auth, generates secrets, binds the app to `127.0.0.1:4000`, and uses safer sandbox defaults. Use Nginx, Caddy, Cloudflare Tunnel, or another TLS reverse proxy to expose it publicly.
 
@@ -70,9 +70,33 @@ For Linux production deployments, use:
 APP_USER=node
 ```
 
-## Codex Login
+## AI CLI Login
 
-KiraAI uses Codex CLI for code jobs, analyzer runs, image generation through Codex, and skill extraction.
+KiraAI defaults to Codex CLI for code jobs, analyzer runs, image generation through Codex, and skill extraction.
+
+To use Claude Code for code jobs and plan generation without an Anthropic API key, set:
+
+```text
+CODE_AGENT_PROVIDER=claude_cli
+AI_PROVIDER=claude_cli
+CLAUDE_HOME_HOST=./.claude-host
+```
+
+Then log in inside Docker:
+
+```bash
+docker compose run --rm -it app /app/node_modules/.bin/claude auth login
+docker compose up -d
+```
+
+Claude Code credentials are stored in the mounted Claude config folder:
+
+```text
+CLAUDE_HOME_HOST=./.claude-host
+CLAUDE_CONFIG_DIR=/home/node/.claude
+```
+
+For the default Codex route, use Codex device login.
 
 Interactive login inside Docker:
 
@@ -93,7 +117,7 @@ If sessions were created with the wrong user, fix the host folder ownership and 
 ## First Use
 
 1. Install and start KiraAI.
-2. Complete Codex device login.
+2. Complete the selected AI CLI login, Codex by default or Claude Code when `CODE_AGENT_PROVIDER=claude_cli`.
 3. In production, create or use the first admin user from the installer bootstrap.
 4. Add learning sources in KiraAI Learning.
 5. Learn skills from those sources.
@@ -148,7 +172,9 @@ KIRAAI_INSTALL_DIR="$HOME/apps/KiraAI-MCP"
 KIRAAI_REPO_URL="https://github.com/HA2614/KiraAI-MCP.git"
 KIRAAI_BRANCH=main
 KIRAAI_BIND_HOST=0.0.0.0
+KIRAAI_CODE_AGENT_PROVIDER=claude_cli
 KIRAAI_SKIP_CODEX_LOGIN=1
+KIRAAI_SKIP_CLAUDE_LOGIN=1
 ```
 
 Production install with explicit public URL and first admin:
@@ -163,7 +189,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HA2614/KiraAI-MCP/main/insta
 ## Security Notes
 
 - Do not expose local/dev mode directly to the public internet.
-- Production mode enables login, secure sessions, Origin checks, rate limits, and safer Codex sandboxes.
+- Production mode enables login, secure JWT cookies, Origin checks, rate limits, and safer AI CLI sandboxes.
 - Production binds to `127.0.0.1:4000` by default so a reverse proxy can handle HTTPS.
 - Keep `.env`, `.codex-host`, Postgres data, Redis data, and workspace data private.
 - Invite links are secret bearer links. Revoke unused invites when needed.

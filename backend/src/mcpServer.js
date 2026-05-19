@@ -102,7 +102,7 @@ server.tool(
   "Generate a new AI plan version for a project.",
   {
     projectId: z.number().int().positive(),
-    provider: z.enum(["codex_cli", "openai", "anthropic"]).optional()
+    provider: z.enum(["codex_cli", "claude_cli", "openai", "anthropic"]).optional()
   },
   async ({ projectId, provider }) => {
     const projectResult = await query("SELECT * FROM projects WHERE id=$1", [projectId]);

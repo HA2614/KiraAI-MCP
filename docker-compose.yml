@@ -14,6 +14,7 @@ services:
     environment:
       NODE_NO_WARNINGS: ${NODE_NO_WARNINGS:-1}
       APP_USER: ${APP_USER:-root}
+      HOME: /home/node
       PORT: 4000
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/mcp_pm
       REDIS_URL: redis://redis:6379
@@ -37,6 +38,7 @@ services:
       CODE_JOB_MAX_ACTIVE: ${CODE_JOB_MAX_ACTIVE:-0}
       ML_JOB_MAX_ACTIVE: ${ML_JOB_MAX_ACTIVE:-0}
       AI_PROVIDER: ${CONTAINER_AI_PROVIDER:-codex_cli}
+      CODE_AGENT_PROVIDER: ${CODE_AGENT_PROVIDER:-codex_cli}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       CODE_AI_MODEL: ${CODE_AI_MODEL:-gpt-5.5}
@@ -64,6 +66,11 @@ services:
       CODEX_TIMEOUT_MS: ${CODEX_TIMEOUT_MS:-900000}
       CODEX_BIN: ${CONTAINER_CODEX_BIN:-/app/node_modules/.bin/codex}
       CODEX_HOME: /home/node/.codex
+      CLAUDE_BIN: ${CONTAINER_CLAUDE_BIN:-/app/node_modules/.bin/claude}
+      CLAUDE_CONFIG_DIR: /home/node/.claude
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-sonnet}
+      CLAUDE_PERMISSION_MODE: ${CLAUDE_PERMISSION_MODE:-bypassPermissions}
+      CLAUDE_MAX_TURNS: ${CLAUDE_MAX_TURNS:-20}
       ML_MIND_ENABLED: ${ML_MIND_ENABLED:-true}
       ML_AI_PROVIDER: ${ML_AI_PROVIDER:-codex_cli}
       ML_EMBEDDING_PROVIDER: ${ML_EMBEDDING_PROVIDER:-local_hash}
@@ -92,6 +99,9 @@ services:
       - type: bind
         source: ${CODEX_HOME_HOST:-./.codex-host}
         target: /home/node/.codex
+      - type: bind
+        source: ${CLAUDE_HOME_HOST:-./.claude-host}
+        target: /home/node/.claude
 
   postgres:
     image: pgvector/pgvector:pg16

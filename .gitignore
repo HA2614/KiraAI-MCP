@@ -25,6 +25,7 @@ jspm_packages/
 .codex/
 .codex-host/
 .claude/
+.claude-host/
 
 # Build output and caches
 dist/
