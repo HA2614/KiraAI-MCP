@@ -110,6 +110,11 @@ function isBroadFilesystemRoot(value) {
   return cleaned === "/host" || /^\/host\/[a-z]$/.test(cleaned) || /^[a-z]:$/i.test(cleaned) || /^[a-z]:\/$/i.test(cleaned);
 }
 
+function isDefaultWorkspaceRoot(value) {
+  const cleaned = String(value || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  return !cleaned || cleaned === DEFAULT_ROOT || cleaned === "/workspace" || isBroadFilesystemRoot(cleaned);
+}
+
 function shallowTreeFromEntries(rootPath, entries = []) {
   return {
     path: rootPath,
@@ -196,6 +201,12 @@ export default function App() {
   const codeSessionRestored = selectedCodeSession.restored;
   const codeTerminalStatus = selectedCodeSession.terminalStatus;
   const codeLastLogAt = selectedCodeSession.lastLogAt;
+  const personalWorkspacePath = useMemo(() => {
+    if (!authState.enabled || !authState.authenticated) return "";
+    if (authState.user?.role === "admin") return "";
+    return authState.user?.workspaceRoot || "";
+  }, [authState.enabled, authState.authenticated, authState.user]);
+  const projectDefaultPath = personalWorkspacePath || settings.targetPath || DEFAULT_ROOT;
   const runningCodeJobSignature = useMemo(() => {
     return Object.entries(codeSessions)
       .filter(([, session]) => session?.job?.id && CODE_JOB_RUNNING_STATUSES.has(session.job.status))
@@ -253,6 +264,17 @@ export default function App() {
     refreshProjects().catch((e) => setError(e.message));
     restoreCodeWorkerSessions().catch(() => setCodeSessionsHydrated(true));
   }, [authState.checking, authState.enabled, authState.authenticated]);
+
+  useEffect(() => {
+    if (!personalWorkspacePath) return;
+    if (!isDefaultWorkspaceRoot(settings.targetPath) && !isDefaultWorkspaceRoot(currentPath)) return;
+    setSettings((prev) => ({ ...prev, targetPath: isDefaultWorkspaceRoot(prev.targetPath) ? personalWorkspacePath : prev.targetPath }));
+    setSavedDefaultPath(personalWorkspacePath);
+    if (isDefaultWorkspaceRoot(currentPath)) {
+      setCurrentPath(personalWorkspacePath);
+      setExplorerLoaded(false);
+    }
+  }, [personalWorkspacePath]);
 
   useEffect(() => {
     const run = () => checkConnection({ silent: true }).catch(() => null);
@@ -803,7 +825,15 @@ export default function App() {
   }
 
   async function inviteProjectMember(projectId, email) {
-    return createProjectInvite(projectId, email);
+    const invite = await createProjectInvite(projectId, email);
+    await refreshProjects().catch(() => null);
+    if (Number(selectedProjectId) === Number(projectId)) await refreshSelectedProject(projectId).catch(() => null);
+    if (invite.project?.root_path) {
+      setSettings((prev) => ({ ...prev, targetPath: invite.project.root_path }));
+      setCurrentPath(invite.project.root_path);
+      setExplorerLoaded(false);
+    }
+    return invite;
   }
 
   async function removeProjectCollaborator(projectId, userId) {
@@ -1198,7 +1228,7 @@ export default function App() {
           <AlertDescription>{notice}</AlertDescription>
         </Alert>
       ) : null}
-      {tab === "projects" ? <ProjectsView busy={busy} projects={projects} refreshProjects={refreshProjects} openProject={openProject} updateProjectRoot={updateProjectRoot} importExistingProject={importExistingProject} createWorkspaceProject={createWorkspaceProject} defaultTargetPath={settings.targetPath} performanceProjectId={performanceProjectId} performanceRuns={performanceRuns} performanceBusy={performanceBusy} loadProjectPerformanceRuns={loadProjectPerformanceRuns} loadProjectMembers={loadProjectMembers} inviteProjectMember={inviteProjectMember} removeProjectCollaborator={removeProjectCollaborator} revokeProjectMemberInvite={revokeProjectMemberInvite} currentUser={authState.user} /> : null}
+      {tab === "projects" ? <ProjectsView busy={busy} projects={projects} refreshProjects={refreshProjects} openProject={openProject} updateProjectRoot={updateProjectRoot} importExistingProject={importExistingProject} createWorkspaceProject={createWorkspaceProject} defaultTargetPath={projectDefaultPath} performanceProjectId={performanceProjectId} performanceRuns={performanceRuns} performanceBusy={performanceBusy} loadProjectPerformanceRuns={loadProjectPerformanceRuns} loadProjectMembers={loadProjectMembers} inviteProjectMember={inviteProjectMember} removeProjectCollaborator={removeProjectCollaborator} revokeProjectMemberInvite={revokeProjectMemberInvite} currentUser={authState.user} /> : null}
       {tab === "plans" ? <PlansView selectedProjectId={selectedProjectId} selectedLatestJson={selectedLatestJson} selectedLatestPlan={selectedLatestPlan} sortedMilestones={sortedMilestones} settings={settings} refreshSelectedProject={refreshSelectedProject} loadHistory={loadHistory} updateFeedback={updateFeedback} promoteBaseline={promoteBaseline} historyFilter={historyFilter} setHistoryFilter={setHistoryFilter} historyRows={historyRows} compareVersion={compareVersion} setCompareVersion={setCompareVersion} runCompare={runCompare} compareResult={compareResult} generatePlan={generatePlan} /> : null}
       {tab === "structure" ? <StructureView settings={settings} setSettings={setSettings} runStructure={runStructure} selectedProjectId={selectedProjectId} structureResult={structureResult} /> : null}
       {tab === "explorer" ? <ExplorerView parentPath={parentPath} loadExplorer={loadExplorer} navigateExplorer={navigateExplorer} goBack={goExplorerBack} goForward={goExplorerForward} canGoBack={explorerBackStack.length > 0} canGoForward={explorerForwardStack.length > 0} currentPath={currentPath} entries={entries} tree={tree} openEntry={openEntry} selectedPaths={selectedPaths} toggleSelect={toggleSelect} openFilePath={openFilePath} setOpenFilePath={setOpenFilePath} openFileContent={openFileContent} setOpenFileContent={setOpenFileContent} dirtyFile={dirtyFile} setDirtyFile={setDirtyFile} saveFile={saveFile} fsConnected={fsConnected} createFolder={createFolder} createFile={createFile} renameSelected={renameSelected} deleteSelected={deleteSelected} copySelected={copySelected} moveSelected={moveSelected} filter={filter} setFilter={setFilter} /> : null}

@@ -631,6 +631,7 @@ router.post("/projects/:id/invites", async (req, res) =>
       role: invite.role,
       status: invite.status,
       expiresAt: invite.expires_at,
+      project: invite.project || null,
       inviteLink: inviteLink(req, invite.token)
     }, null, 201);
   })

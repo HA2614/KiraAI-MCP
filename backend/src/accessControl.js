@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, rename, stat } from "node:fs/promises";
 import path from "node:path";
 import { config } from "./config.js";
 import { query } from "./db.js";
@@ -15,6 +15,22 @@ function withSep(value) {
 function isInside(root, target) {
   const relative = path.relative(root, target);
   return !relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function samePath(a, b) {
+  return path.resolve(a) === path.resolve(b);
+}
+
+function fsBaseRoot() {
+  return resolveSafePath(config.fsBasePath);
+}
+
+export function sharedProjectsRoot() {
+  return path.join(fsBaseRoot(), "shared", "projects");
+}
+
+function isAdminUser(user) {
+  return user?.role === "admin";
 }
 
 function addDaysMs(date, ms) {
@@ -228,6 +244,10 @@ export async function listProjectsForUser(user) {
     const rows = await query(`${projectSelectSql()} ORDER BY p.created_at DESC`);
     return rows.rows;
   }
+  if (isAdminUser(user)) {
+    const rows = await query(`${projectSelectSql()} ORDER BY p.created_at DESC`);
+    return rows.rows.map((project) => ({ ...project, membership_role: project.membership_role || "owner" }));
+  }
   const rows = await query(
     `${projectSelectSql({ includeMembership: true })}
      WHERE pm.user_id=$1
@@ -242,6 +262,11 @@ export async function getProjectForUser(projectId, user, { roles = ["owner", "ed
     const row = await query(`${projectSelectSql()} WHERE p.id=$1 LIMIT 1`, [projectId]);
     if (!row.rowCount) throw new NotFoundError("Project not found");
     return row.rows[0];
+  }
+  if (isAdminUser(user)) {
+    const row = await query(`${projectSelectSql()} WHERE p.id=$1 LIMIT 1`, [projectId]);
+    if (!row.rowCount) throw new NotFoundError("Project not found");
+    return { ...row.rows[0], membership_role: "owner" };
   }
   const row = await query(
     `${projectSelectSql({ includeMembership: true })}
@@ -265,6 +290,7 @@ export async function getProjectByPlanForUser(planId, user, options = {}) {
 
 export async function getAllowedRootsForUser(user) {
   if (!config.authEnabled || !user?.id) return [resolveSafePath(config.fsBasePath)];
+  if (isAdminUser(user)) return [fsBaseRoot()];
   const ensured = await ensureUserWorkspace(user);
   const roots = [ensured.workspace_root];
   const rows = await query(
@@ -292,6 +318,7 @@ export async function assertUserPathAccess(user, targetPath, { write = false } =
     ? await resolveWritableSafePath(targetPath)
     : await resolveExistingSafePath(targetPath);
   if (!config.authEnabled || !user?.id) return safeTarget;
+  if (isAdminUser(user)) return safeTarget;
   const allowedRoots = await getAllowedRootsForUser(user);
   const allowed = allowedRoots.some((root) => safeTarget === root || safeTarget.startsWith(withSep(root)) || isInside(root, safeTarget));
   if (!allowed) {
@@ -316,9 +343,18 @@ export function projectFolderSlug(value) {
 
 export async function nextAvailableUserProjectFolder(user, projectName, basePath = "") {
   const ensured = await ensureUserWorkspace(user);
-  const parentCandidate = basePath?.trim()
-    ? await assertUserPathAccess(ensured, basePath, { write: true })
-    : await resolveWritableSafePath(path.join(ensured.workspace_root, "projects"));
+  const requestedBase = String(basePath || "").trim();
+  let parentCandidate = "";
+  if (requestedBase) {
+    const requestedSafe = await resolveWritableSafePath(requestedBase);
+    const userWorkspace = path.resolve(ensured.workspace_root);
+    const broadUserDefault = !isAdminUser(ensured) && (samePath(requestedSafe, fsBaseRoot()) || samePath(requestedSafe, userWorkspace));
+    parentCandidate = broadUserDefault
+      ? await resolveWritableSafePath(path.join(userWorkspace, "projects"))
+      : await assertUserPathAccess(ensured, requestedSafe, { write: true });
+  } else {
+    parentCandidate = await resolveWritableSafePath(path.join(ensured.workspace_root, "projects"));
+  }
   const parent = await assertUserPathAccess(ensured, parentCandidate, { write: true });
   await mkdir(parent, { recursive: true });
   const slug = projectFolderSlug(projectName);
@@ -328,6 +364,61 @@ export async function nextAvailableUserProjectFolder(user, projectName, basePath
     if (!(await pathExists(candidate))) return { parent, rootPath: candidate };
   }
   throw new ValidationError("Could not find an available project folder name");
+}
+
+async function nextAvailableSharedProjectFolder(project) {
+  const parent = await resolveWritableSafePath(sharedProjectsRoot());
+  await mkdir(parent, { recursive: true });
+  const slug = projectFolderSlug(project.name || `project-${project.id}`);
+  for (let index = 0; index < 1000; index += 1) {
+    const suffix = index === 0 ? "" : `-${index + 1}`;
+    const candidate = await resolveWritableSafePath(path.join(parent, `p_${project.id}_${slug}${suffix}`));
+    if (!(await pathExists(candidate))) return candidate;
+  }
+  throw new ValidationError("Could not find an available shared project folder name");
+}
+
+function assertProjectRootCanBeShared(projectRoot, userWorkspaceRoot = "") {
+  const baseRoot = fsBaseRoot();
+  const sharedRoot = sharedProjectsRoot();
+  const resolved = path.resolve(projectRoot);
+  if (samePath(resolved, baseRoot) || samePath(resolved, sharedRoot)) {
+    throw new ValidationError("Project root must be a dedicated project folder before it can be shared");
+  }
+  if (userWorkspaceRoot && samePath(resolved, userWorkspaceRoot)) {
+    throw new ValidationError("Project root cannot be the entire personal workspace");
+  }
+}
+
+export async function ensureProjectInSharedWorkspace(projectId, user) {
+  const project = await getProjectForUser(projectId, user, { roles: ["owner"] });
+  const sharedRoot = await resolveWritableSafePath(sharedProjectsRoot());
+  await mkdir(sharedRoot, { recursive: true });
+
+  if (project.root_path?.trim()) {
+    const currentRoot = await resolveWritableSafePath(project.root_path);
+    if (isInside(sharedRoot, currentRoot)) return project;
+  }
+
+  const actingUser = user?.id ? await ensureUserWorkspace(user) : null;
+  const currentRoot = project.root_path?.trim() ? await resolveWritableSafePath(project.root_path) : "";
+  if (currentRoot) assertProjectRootCanBeShared(currentRoot, actingUser?.workspace_root || "");
+
+  const targetRoot = await nextAvailableSharedProjectFolder(project);
+  await mkdir(path.dirname(targetRoot), { recursive: true });
+  if (currentRoot && await pathExists(currentRoot)) {
+    await rename(currentRoot, targetRoot);
+  } else {
+    await mkdir(targetRoot, { recursive: true });
+  }
+
+  const updated = await query(
+    "UPDATE projects SET root_path=$1, updated_at=NOW() WHERE id=$2 RETURNING *",
+    [targetRoot, projectId]
+  );
+  await query("UPDATE code_jobs SET root_path=$1, updated_at=NOW() WHERE project_id=$2", [targetRoot, projectId]).catch(() => null);
+  await query("UPDATE codebase_summaries SET root_path=$1 WHERE project_id=$2", [targetRoot, projectId]).catch(() => null);
+  return { ...updated.rows[0], membership_role: "owner" };
 }
 
 export async function createProjectRecordForUser(user, payload) {
@@ -405,7 +496,7 @@ export async function deleteProjectForUser(projectId, user) {
 }
 
 export async function createProjectInvite(projectId, emailValue, invitedByUser) {
-  await getProjectForUser(projectId, invitedByUser, { roles: ["owner"] });
+  const sharedProject = await ensureProjectInSharedWorkspace(projectId, invitedByUser);
   const email = normalizeEmail(emailValue);
   await query(
     "UPDATE project_invites SET status='revoked', updated_at=NOW() WHERE project_id=$1 AND email=$2 AND status='pending'",
@@ -419,7 +510,7 @@ export async function createProjectInvite(projectId, emailValue, invitedByUser) 
      RETURNING id, project_id, email, role, invited_by_user_id, status, expires_at, created_at`,
     [projectId, email, tokenHash(token), invitedByUser?.id || null, expiresAt]
   );
-  return { ...row.rows[0], token };
+  return { ...row.rows[0], token, project: sharedProject };
 }
 
 export async function getInviteByToken(rawToken) {

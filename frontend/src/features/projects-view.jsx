@@ -39,7 +39,7 @@ export function ProjectsView({
 
   useEffect(() => {
     if (!importPath && defaultTargetPath) setImportPath(defaultTargetPath);
-    if (!projectBasePath && defaultTargetPath) setProjectBasePath(defaultTargetPath);
+    if (defaultTargetPath && (!projectBasePath || isDefaultWorkspacePath(projectBasePath))) setProjectBasePath(defaultTargetPath);
   }, [defaultTargetPath, importPath, projectBasePath]);
 
   async function submitImport(event) {
@@ -309,6 +309,11 @@ export function ProjectsView({
       </Card>
     </div>
   );
+}
+
+function isDefaultWorkspacePath(value) {
+  const cleaned = String(value || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return !cleaned || cleaned === "/workspace" || cleaned === "/host" || /^\/host\/[a-z]$/.test(cleaned) || /^[a-z]:$/.test(cleaned);
 }
 
 function TimingBadge({ label, value, empty }) {
