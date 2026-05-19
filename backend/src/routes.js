@@ -76,6 +76,7 @@ import {
   assertUserPathAccess,
   createProjectInvite,
   createProjectRecordForUser,
+  createUserForAdmin,
   createWorkspaceProjectForUser,
   deleteProjectForUser,
   ensureProjectMembership,
@@ -84,6 +85,7 @@ import {
   getProjectForUser,
   listProjectMembersAndInvites,
   listProjectsForUser,
+  listUsersForAdmin,
   publicUser,
   removeProjectMember,
   revokeProjectInvite,
@@ -194,6 +196,12 @@ const inviteAcceptSchema = z.object({
   password: z.string().optional().default(""),
   displayName: z.string().optional().default("")
 });
+const adminCreateUserSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(10),
+  displayName: z.string().optional().default(""),
+  role: z.enum(["user", "admin"]).optional().default("user")
+});
 const mlSourceSchema = z.object({
   url: z.string().min(1)
 });
@@ -302,6 +310,25 @@ export const router = express.Router();
 router.get("/health", (_req, res) => ok(res, { ok: true }));
 
 router.get("/code-reference-repos", (_req, res) => ok(res, listReferenceRepos()));
+
+router.get("/admin/users", async (req, res) =>
+  routeGuard(res, async () => ok(res, await listUsersForAdmin(req.auth?.user)))
+);
+
+router.post("/admin/users", async (req, res) =>
+  routeGuard(res, async () => {
+    const parsed = adminCreateUserSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid user payload", parsed.error.flatten());
+    const passwordHash = await hashPassword(parsed.data.password);
+    const user = await createUserForAdmin(req.auth?.user, {
+      email: parsed.data.email,
+      passwordHash,
+      displayName: parsed.data.displayName,
+      role: parsed.data.role
+    });
+    return ok(res, user, null, 201);
+  })
+);
 
 router.get("/ml/status", (_req, res) =>
   routeGuard(res, async () => ok(res, await getMlStatus()))

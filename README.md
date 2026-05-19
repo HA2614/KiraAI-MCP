@@ -36,6 +36,8 @@ The installer checks Ubuntu, installs Docker if needed, clones or updates the re
 
 Production profile enables auth, generates secrets, binds the app to `127.0.0.1:4000`, and uses safer sandbox defaults. Use Nginx, Caddy, Cloudflare Tunnel, or another TLS reverse proxy to expose it publicly.
 
+Login uses a signed JWT in an HttpOnly cookie. Tokens expire after `AUTH_SESSION_TTL_MS` and are also invalidated when the app container restarts, so users must sign in again after a restart.
+
 ## Manual Local Start
 
 ```bash
@@ -112,6 +114,7 @@ This keeps Codex from acting as a plain fallback writer when the server has not 
 - Accept/Reject: generated file changes stay reviewable before they are applied.
 - KiraAI Learning: add GitHub or website sources, learn skills, inspect jobs, export source lists.
 - Projects: each user has a personal workspace and can invite collaborators to shared projects.
+- Users: admins can create user/admin accounts from Settings.
 - Analyzer: inspect codebases and generate project context.
 - Explorer: browse project files with workspace and symlink safety checks.
 

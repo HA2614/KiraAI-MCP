@@ -10,6 +10,8 @@ import {
   RefreshCcw,
   Search,
   Trash2,
+  UserPlus,
+  Users,
   XCircle
 } from "lucide-react";
 import { apiDelete, apiGet, apiPatch, apiPost, openMlJobEvents } from "@/api";
@@ -27,11 +29,16 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { ACTIVE_JOB_STATUSES, upsertById, useMlJobEvents } from "@/features/ml-panel-events";
 
-export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefaultSettings }) {
+export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefaultSettings, currentUser }) {
   const [mlStatus, setMlStatus] = useState(null);
   const [sources, setSources] = useState([]);
   const [jobs, setJobs] = useState([]);
   const [skills, setSkills] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [userForm, setUserForm] = useState({ email: "", password: "", displayName: "", role: "user" });
+  const [usersBusy, setUsersBusy] = useState(false);
+  const [usersError, setUsersError] = useState("");
+  const [usersNotice, setUsersNotice] = useState("");
   const [selectedSkill, setSelectedSkill] = useState(null);
   const [repoLinks, setRepoLinks] = useState("");
   const [websiteLinks, setWebsiteLinks] = useState("");
@@ -54,6 +61,11 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
   useEffect(() => {
     refreshMlPanel().catch((error) => setMlError(error.message));
   }, []);
+
+  useEffect(() => {
+    if (currentUser?.role !== "admin") return;
+    refreshUsers().catch((error) => setUsersError(error.message || "Could not load users"));
+  }, [currentUser?.role]);
 
   useEffect(() => {
     refreshMlPanel({ silent: true }).catch(() => null);
@@ -84,6 +96,34 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
       }
     } finally {
       if (!silent) setMlBusy(false);
+    }
+  }
+
+  async function refreshUsers() {
+    if (currentUser?.role !== "admin") return;
+    setUsersBusy(true);
+    setUsersError("");
+    try {
+      setUsers(await apiGet("/admin/users"));
+    } finally {
+      setUsersBusy(false);
+    }
+  }
+
+  async function createUser(event) {
+    event.preventDefault();
+    setUsersBusy(true);
+    setUsersError("");
+    setUsersNotice("");
+    try {
+      const created = await apiPost("/admin/users", userForm);
+      setUserForm({ email: "", password: "", displayName: "", role: "user" });
+      setUsersNotice(`User created: ${created.email}`);
+      await refreshUsers();
+    } catch (error) {
+      setUsersError(error.message || "Could not create user");
+    } finally {
+      setUsersBusy(false);
     }
   }
 
@@ -238,6 +278,7 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
     <Tabs defaultValue="general" className="space-y-3">
       <TabsList className="flex w-fit flex-wrap">
         <TabsTrigger value="general">General</TabsTrigger>
+        {currentUser?.role === "admin" ? <TabsTrigger value="users">Users</TabsTrigger> : null}
         <TabsTrigger value="mind">KiraAI Learning</TabsTrigger>
         <TabsTrigger value="skills">KiraAI Skills</TabsTrigger>
         <TabsTrigger value="jobs">KiraAI Jobs</TabsTrigger>
@@ -267,6 +308,95 @@ export function SettingsView({ settings, setSettings, savedDefaultPath, saveDefa
           </CardContent>
         </Card>
       </TabsContent>
+
+      {currentUser?.role === "admin" ? (
+        <TabsContent value="users">
+          <div className="grid gap-3 xl:grid-cols-[390px_minmax(0,1fr)]">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <UserPlus className="h-5 w-5 text-primary" />
+                  Create User
+                </CardTitle>
+                <CardDescription>Admin-created accounts can log in directly with email and password.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form className="grid gap-3" onSubmit={createUser}>
+                  <Input
+                    type="email"
+                    autoComplete="email"
+                    placeholder="user@example.com"
+                    value={userForm.email}
+                    onChange={(event) => setUserForm((prev) => ({ ...prev, email: event.target.value }))}
+                  />
+                  <Input
+                    placeholder="Display name"
+                    autoComplete="name"
+                    value={userForm.displayName}
+                    onChange={(event) => setUserForm((prev) => ({ ...prev, displayName: event.target.value }))}
+                  />
+                  <Input
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder="Temporary password, min 10 chars"
+                    value={userForm.password}
+                    onChange={(event) => setUserForm((prev) => ({ ...prev, password: event.target.value }))}
+                  />
+                  <Select value={userForm.role} onValueChange={(role) => setUserForm((prev) => ({ ...prev, role }))}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="user">User</SelectItem>
+                      <SelectItem value="admin">Admin</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button type="submit" disabled={usersBusy || !userForm.email || userForm.password.length < 10}>
+                    {usersBusy ? "Creating..." : "Create user"}
+                  </Button>
+                  {usersError ? <p className="state-danger rounded-md border p-3 text-sm">{usersError}</p> : null}
+                  {usersNotice ? <p className="state-success rounded-md border p-3 text-sm">{usersNotice}</p> : null}
+                </form>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <Users className="h-5 w-5 text-primary" />
+                      Users
+                    </CardTitle>
+                    <CardDescription>Personal workspaces stay isolated unless a project is shared.</CardDescription>
+                  </div>
+                  <Button variant="outline" onClick={refreshUsers} disabled={usersBusy}>Refresh</Button>
+                </div>
+              </CardHeader>
+              <CardContent className="grid gap-2">
+                {users.map((user) => (
+                  <div key={user.id} className="rounded-md border border-border/70 bg-card/70 p-3 text-sm">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">{user.displayName || user.email}</span>
+                          <Badge variant={user.role === "admin" ? "default" : "outline"}>{user.role}</Badge>
+                          <Badge variant={user.status === "active" ? "secondary" : "outline"}>{user.status}</Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">{user.email}</div>
+                        <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{user.workspaceRoot || "Workspace pending"}</div>
+                      </div>
+                      <div className="shrink-0 text-right text-xs text-muted-foreground">
+                        <div>Last login</div>
+                        <div>{formatDate(user.lastLoginAt || user.last_login_at)}</div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {!users.length ? <p className="rounded-md border p-3 text-sm text-muted-foreground">No users found.</p> : null}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+      ) : null}
 
       <TabsContent value="mind">
         <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_380px]">

@@ -1,7 +1,6 @@
 import { createHmac, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import express from "express";
-import { redis } from "./cache.js";
 import { config } from "./config.js";
 import { ExternalServiceError, ForbiddenError, UnauthorizedError, ValidationError } from "./errors.js";
 import { fail, ok } from "./response.js";
@@ -23,6 +22,7 @@ const SCRYPT_PARAMS = {
   p: 1,
   keylen: 64
 };
+const AUTH_BOOT_ID = b64url(randomBytes(24));
 
 function b64url(buffer) {
   return Buffer.from(buffer).toString("base64url");
@@ -49,27 +49,37 @@ function parseCookies(header = "") {
   return out;
 }
 
-function sessionKey(sessionId) {
-  return `auth:sessions:${sessionId}`;
+function signJwt(headerPart, payloadPart) {
+  return b64url(createHmac("sha256", config.sessionSecret).update(`${headerPart}.${payloadPart}`).digest());
 }
 
-function signSessionId(sessionId) {
-  return b64url(createHmac("sha256", config.sessionSecret).update(sessionId).digest());
+function encodeJwt(payload) {
+  const headerPart = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payloadPart = b64url(JSON.stringify(payload));
+  return `${headerPart}.${payloadPart}.${signJwt(headerPart, payloadPart)}`;
 }
 
-function encodeCookieValue(sessionId) {
-  return `${sessionId}.${signSessionId(sessionId)}`;
-}
-
-function decodeCookieValue(value) {
-  const [sessionId, signature] = String(value || "").split(".");
-  if (!sessionId || !signature || !config.sessionSecret) return "";
-  const expected = signSessionId(sessionId);
+function decodeJwt(value) {
+  const [headerPart, payloadPart, signature] = String(value || "").split(".");
+  if (!headerPart || !payloadPart || !signature || !config.sessionSecret) return null;
+  const expected = signJwt(headerPart, payloadPart);
   const actualBuffer = Buffer.from(signature);
   const expectedBuffer = Buffer.from(expected);
-  if (actualBuffer.length !== expectedBuffer.length) return "";
-  if (!timingSafeEqual(actualBuffer, expectedBuffer)) return "";
-  return sessionId;
+  if (actualBuffer.length !== expectedBuffer.length) return null;
+  if (!timingSafeEqual(actualBuffer, expectedBuffer)) return null;
+  let header = null;
+  let payload = null;
+  try {
+    header = JSON.parse(fromB64url(headerPart).toString("utf8"));
+    payload = JSON.parse(fromB64url(payloadPart).toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (header?.alg !== "HS256" || header?.typ !== "JWT") return null;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (!payload?.sub || !payload?.exp || Number(payload.exp) <= nowSeconds) return null;
+  if (payload.boot !== AUTH_BOOT_ID) return null;
+  return payload;
 }
 
 function cookieSecure(req) {
@@ -141,23 +151,18 @@ export async function optionalAuth(req, _res, next) {
     if (!config.authEnabled) return next();
     assertAuthConfigured();
     const cookies = parseCookies(req.headers.cookie || "");
-    const sessionId = decodeCookieValue(cookies[config.authCookieName]);
-    if (!sessionId) return next();
-    const raw = await redis.get(sessionKey(sessionId));
-    if (!raw) return next();
-    const session = JSON.parse(raw);
-    const user = await getUserById(session.userId);
+    const token = decodeJwt(cookies[config.authCookieName]);
+    if (!token) return next();
+    const user = await getUserById(token.sub);
     if (!user || user.status !== "active") {
-      await redis.del(sessionKey(sessionId)).catch(() => null);
       return next();
     }
     req.auth = {
       enabled: true,
       authenticated: true,
-      sessionId,
+      token,
       user
     };
-    await redis.pexpire(sessionKey(sessionId), config.authSessionTtlMs).catch(() => null);
     return next();
   } catch (error) {
     return next(error);
@@ -208,22 +213,23 @@ export function originGuard(req, res, next) {
 }
 
 export async function createSessionForUser(req, res, user) {
-  const sessionId = b64url(randomBytes(32));
+  const nowSeconds = Math.floor(Date.now() / 1000);
   const payload = {
-    userId: user.id,
+    sub: String(user.id),
     email: user.email,
-    createdAt: new Date().toISOString(),
+    role: user.role || "user",
+    boot: AUTH_BOOT_ID,
+    jti: b64url(randomBytes(18)),
+    iat: nowSeconds,
+    exp: nowSeconds + Math.floor(config.authSessionTtlMs / 1000),
     requestId: req.requestId || null
   };
-  await redis.set(sessionKey(sessionId), JSON.stringify(payload), "PX", config.authSessionTtlMs);
-  res.setHeader("Set-Cookie", serializeSessionCookie(req, encodeCookieValue(sessionId)));
+  res.setHeader("Set-Cookie", serializeSessionCookie(req, encodeJwt(payload)));
   await touchUserLogin(user.id);
   return payload;
 }
 
 export async function destroySession(req, res) {
-  const sessionId = req.auth?.sessionId;
-  if (sessionId) await redis.del(sessionKey(sessionId)).catch(() => null);
   res.setHeader("Set-Cookie", clearSessionCookie(req));
 }
 
@@ -245,6 +251,7 @@ authRouter.get("/status", async (req, res, next) => {
       enabled: config.authEnabled,
       authenticated: Boolean(req.auth?.authenticated),
       setupRequired: Boolean(config.authEnabled && userCount === 0),
+      sessionMode: config.authEnabled ? "jwt_restart_expiring" : "disabled",
       user: req.auth?.authenticated ? publicUser(req.auth.user) : null
     });
   } catch (error) {

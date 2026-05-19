@@ -62,7 +62,9 @@ export function publicUser(row) {
     displayName: row.display_name || row.displayName || "",
     role: row.role || "user",
     status: row.status || "active",
-    workspaceRoot: row.workspace_root || row.workspaceRoot || ""
+    workspaceRoot: row.workspace_root || row.workspaceRoot || "",
+    lastLoginAt: row.last_login_at || row.lastLoginAt || null,
+    createdAt: row.created_at || row.createdAt || null
   };
 }
 
@@ -115,13 +117,36 @@ export async function ensureUserWorkspace(userOrId) {
 export async function createUserWithHash({ email, passwordHash, displayName = "", role = "user", status = "active" }) {
   const normalizedEmail = normalizeEmail(email);
   if (!passwordHash) throw new ValidationError("Password hash is required");
+  const normalizedRole = role === "admin" ? "admin" : "user";
   const row = await query(
     `INSERT INTO users (email, password_hash, display_name, role, status)
      VALUES ($1,$2,$3,$4,$5)
      RETURNING *`,
-    [normalizedEmail, passwordHash, String(displayName || "").trim(), role, status]
+    [normalizedEmail, passwordHash, String(displayName || "").trim(), normalizedRole, status]
   );
   return ensureUserWorkspace(row.rows[0]);
+}
+
+export async function listUsersForAdmin(user) {
+  if (!config.authEnabled || user?.role === "admin") {
+    const rows = await query(
+      `SELECT id, email, display_name, role, status, workspace_root, last_login_at, created_at, updated_at
+       FROM users
+       ORDER BY created_at DESC`
+    );
+    return rows.rows.map(publicUser);
+  }
+  throw new ForbiddenError("Admin access required", "ADMIN_REQUIRED");
+}
+
+export async function createUserForAdmin(adminUser, { email, passwordHash, displayName = "", role = "user" }) {
+  if (config.authEnabled && adminUser?.role !== "admin") {
+    throw new ForbiddenError("Admin access required", "ADMIN_REQUIRED");
+  }
+  const existing = await getUserByEmail(email).catch(() => null);
+  if (existing) throw new ValidationError("A user with this email already exists");
+  const user = await createUserWithHash({ email, passwordHash, displayName, role, status: "active" });
+  return publicUser(user);
 }
 
 export async function touchUserLogin(userId) {

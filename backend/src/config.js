@@ -72,7 +72,7 @@ export const config = {
   inviteTtlMs: parseIntEnv(process.env.INVITE_TTL_MS, 7 * 24 * 60 * 60 * 1000, { min: 60_000 }),
   sessionSecret: process.env.SESSION_SECRET || "",
   authSessionTtlMs: parseIntEnv(process.env.AUTH_SESSION_TTL_MS, 12 * 60 * 60 * 1000, { min: 60_000 }),
-  authCookieName: process.env.AUTH_COOKIE_NAME || "kiraai.sid",
+  authCookieName: process.env.AUTH_COOKIE_NAME || "kiraai.jwt",
   authCookieSecure: parseBool(process.env.AUTH_COOKIE_SECURE, false),
   corsAllowedOrigins: parseCsv(process.env.CORS_ALLOWED_ORIGINS, []),
   rateLimitWindowMs: parseIntEnv(process.env.RATE_LIMIT_WINDOW_MS, 60_000, { min: 1000 }),

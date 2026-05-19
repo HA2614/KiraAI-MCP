@@ -323,6 +323,7 @@ write_env() {
     set_env_value .env INVITE_TTL_MS "604800000"
     set_env_value .env SESSION_SECRET "$session_secret"
     set_env_value .env AUTH_SESSION_TTL_MS "43200000"
+    set_env_value .env AUTH_COOKIE_NAME "kiraai.jwt"
     set_env_value .env AUTH_COOKIE_SECURE "$([[ "$public_origin" == https://* ]] && echo true || echo false)"
     set_env_value .env CORS_ALLOWED_ORIGINS "$public_origin"
     set_env_value .env TRUST_PROXY "true"

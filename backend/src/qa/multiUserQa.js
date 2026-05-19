@@ -6,9 +6,12 @@ import {
   acceptInviteToken,
   assertUserPathAccess,
   createProjectInvite,
+  createUserForAdmin,
   createUserWithHash,
   createWorkspaceProjectForUser,
+  getUserByEmail,
   getProjectForUser,
+  listUsersForAdmin,
   listProjectsForUser,
   sharedProjectsRoot,
   tokenHash
@@ -78,8 +81,18 @@ try {
   const adminProjects = await listProjectsForUser(admin);
   assert.equal(adminProjects.some((item) => Number(item.id) === Number(project.id)), true);
   await getProjectForUser(project.id, admin, { roles: ["owner"] });
+  const adminUsers = await listUsersForAdmin(admin);
+  assert.equal(adminUsers.some((item) => item.email === emailA), true);
+  await rejects(() => listUsersForAdmin(owner), /Admin access required/i);
 
   const editorPasswordHash = await hashPassword("another-password-123");
+  const createdByAdmin = await createUserForAdmin(admin, {
+    email: emailB,
+    passwordHash: editorPasswordHash,
+    displayName: "QA Editor",
+    role: "user"
+  });
+  assert.equal(createdByAdmin.email, emailB);
   const invite = await createProjectInvite(project.id, emailB, owner);
   assert.ok(invite.token, "Invite token should be returned once");
   const stored = await query("SELECT token_hash FROM project_invites WHERE id=$1", [invite.id]);
@@ -93,7 +106,7 @@ try {
   await assertUserPathAccess(owner, project.root_path);
 
   const accepted = await acceptInviteToken(invite.token, {
-    passwordHash: editorPasswordHash,
+    currentUser: await getUserByEmail(emailB),
     displayName: "QA Editor"
   });
   cleanupPaths.add(accepted.user.workspace_root);
