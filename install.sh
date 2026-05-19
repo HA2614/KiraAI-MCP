@@ -344,7 +344,7 @@ write_env() {
     set_env_value .env ML_JOB_MAX_ACTIVE "1"
     set_env_value .env FS_MAX_READ_BYTES "1048576"
     set_env_value .env APP_USER "node"
-    set_env_value .env CODE_JOB_SANDBOX "workspace-write"
+    set_env_value .env CODE_JOB_SANDBOX "danger-full-access"
     set_env_value .env CODEX_SUMMARY_SANDBOX "read-only"
     set_env_value .env CLAUDE_PERMISSION_MODE "acceptEdits"
     echo "Production profile enabled. App port binds to ${KIRAAI_BIND_HOST:-127.0.0.1}; use a reverse proxy/TLS for public access when internet-facing."

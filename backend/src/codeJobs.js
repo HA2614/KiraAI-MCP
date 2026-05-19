@@ -492,6 +492,14 @@ function codeAgentLabel(provider = resolveCodeAgentProvider()) {
   return provider === "claude_cli" ? "Claude Code" : "Codex";
 }
 
+function codexRuntimeSandbox(configuredSandbox = config.codeJobSandbox) {
+  const sandbox = String(configuredSandbox || "danger-full-access").trim() || "danger-full-access";
+  // Code jobs already run in an isolated temporary copy. Avoid Codex bubblewrap
+  // inside Docker because user namespaces are commonly blocked there.
+  if (sandbox === "workspace-write" || sandbox === "read-only") return "danger-full-access";
+  return sandbox;
+}
+
 function codeJobCliExitError(provider, code, stderr = "", stdout = "") {
   const compactStderr = stderr.trim();
   const compactStdout = stdout.trim();
@@ -1139,6 +1147,7 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
   }
   let agentBin = "";
   let args = [];
+  const codexSandbox = codexRuntimeSandbox();
   if (provider === "claude_cli") {
     agentBin = await resolveClaudeBinary();
     args = [
@@ -1161,7 +1170,7 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
       "never",
       "exec",
       "--sandbox",
-      config.codeJobSandbox,
+      codexSandbox,
       "--ephemeral",
       "--ignore-user-config",
       "--ignore-rules",
@@ -1179,7 +1188,8 @@ async function callCodeModelWithCodex(jobId, rootPath, prompt, timer = null) {
     provider,
     model: provider === "claude_cli" ? config.claudeModel : config.codeAiModel,
     reasoningEffort: provider === "claude_cli" ? undefined : config.codeJobReasoningEffort,
-    sandbox: provider === "claude_cli" ? config.claudePermissionMode : config.codeJobSandbox,
+    sandbox: provider === "claude_cli" ? config.claudePermissionMode : codexSandbox,
+    configuredSandbox: provider === "codex_cli" && codexSandbox !== config.codeJobSandbox ? config.codeJobSandbox : undefined,
     timeoutMs: config.codeJobTimeoutMs
   });
 
@@ -1643,11 +1653,16 @@ export async function runCodeJob(jobId, { resumed = false, reason = "" } = {}) {
   await markCodeJobStage(jobId, timer, "save_proposal");
   const changedFiles = (payload.changedFiles || []).filter((file) => file.action !== "skipped");
   const skippedFiles = (payload.changedFiles || []).filter((file) => file.action === "skipped");
+  if (!changedFiles.length) {
+    throw new ExternalServiceError(
+      "KiraAI finished without producing file changes. The AI CLI did not write anything into the isolated workspace, so there is no safe proposal to accept.",
+      { summary: String(payload.codexSummary || "").slice(0, 2000), skippedFiles },
+      "CODE_JOB_NO_CHANGES"
+    );
+  }
   const additions = changedFiles.reduce((sum, file) => sum + Number(file.additions || 0), 0);
   const deletions = changedFiles.reduce((sum, file) => sum + Number(file.deletions || 0), 0);
-  const diffSummary = changedFiles.length
-    ? `${changedFiles.length} file change(s) (+${additions} -${deletions}): ${changedFiles.map((file) => file.path).slice(0, 8).join(", ")}${changedFiles.length > 8 ? ", ..." : ""}`
-    : "KiraAI finished but did not modify files.";
+  const diffSummary = `${changedFiles.length} file change(s) (+${additions} -${deletions}): ${changedFiles.map((file) => file.path).slice(0, 8).join(", ")}${changedFiles.length > 8 ? ", ..." : ""}`;
   const riskNotes = [
     "Changes were made in an isolated temporary copy. Real project files are untouched until Accept Changes.",
     ...(learnedSkillNote ? [learnedSkillNote] : []),
