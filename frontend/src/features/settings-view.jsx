@@ -803,3 +803,10 @@ function formatDuration(start, end) {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${seconds % 60}s`;
 }
+
+function formatDate(value) {
+  if (!value) return "Never";
+  const time = new Date(value);
+  if (Number.isNaN(time.getTime())) return "Unknown";
+  return time.toLocaleString();
+}
