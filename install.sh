@@ -6,6 +6,7 @@ KIRAAI_REPO_URL="${KIRAAI_REPO_URL:-https://github.com/HA2614/KiraAI-MCP.git}"
 KIRAAI_BRANCH="${KIRAAI_BRANCH:-main}"
 KIRAAI_SKIP_CODEX_LOGIN="${KIRAAI_SKIP_CODEX_LOGIN:-0}"
 KIRAAI_PROFILE="${KIRAAI_PROFILE:-local}"
+KIRAAI_BIND_HOST="${KIRAAI_BIND_HOST:-}"
 KIRAAI_PUBLIC_URL="${KIRAAI_PUBLIC_URL:-}"
 KIRAAI_ADMIN_EMAIL="${KIRAAI_ADMIN_EMAIL:-}"
 KIRAAI_ADMIN_PASSWORD="${KIRAAI_ADMIN_PASSWORD:-}"
@@ -97,7 +98,26 @@ env_file_value() {
   if [[ -f "$file" ]]; then
     value="$(grep -E "^${key}=" "$file" | tail -n 1 | cut -d= -f2- || true)"
   fi
+  value="${value%$'\r'}"
+  if [[ "$value" == \'*\' && "$value" == *\' && "${#value}" -ge 2 ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "$value" == \"*\" && "$value" == *\" && "${#value}" -ge 2 ]]; then
+    value="${value:1:${#value}-2}"
+  fi
   printf '%s' "$value"
+}
+
+env_render_value() {
+  local key="$1"
+  local value="$2"
+  if [[ "$value" == *"'"* ]]; then
+    fail "Cannot write ${key} to .env because the value contains a single quote."
+  fi
+  if [[ "$value" == *'$'* || "$value" == *'#'* || "$value" == *' '* || "$value" == *$'\t'* ]]; then
+    printf "'%s'" "$value"
+  else
+    printf '%s' "$value"
+  fi
 }
 
 url_origin() {
@@ -233,11 +253,33 @@ set_env_value() {
   local file="$1"
   local key="$2"
   local value="$3"
+  local rendered
+  local temp_file
+
+  rendered="${key}=$(env_render_value "$key" "$value")"
 
   if grep -qE "^${key}=" "$file"; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    temp_file="$(mktemp)"
+    awk -v key="$key" -v line="$rendered" '
+      BEGIN { replaced = 0 }
+      $0 ~ "^" key "=" {
+        if (!replaced) {
+          print line
+          replaced = 1
+        }
+        next
+      }
+      { print }
+      END {
+        if (!replaced) {
+          print line
+        }
+      }
+    ' "$file" > "$temp_file"
+    cat "$temp_file" > "$file"
+    rm -f "$temp_file"
   else
-    printf '\n%s=%s\n' "$key" "$value" >> "$file"
+    printf '\n%s\n' "$rendered" >> "$file"
   fi
 }
 
@@ -274,7 +316,7 @@ write_env() {
       public_origin="$(url_origin "$KIRAAI_PUBLIC_URL")"
     fi
 
-    set_env_value .env APP_BIND_HOST "127.0.0.1"
+    set_env_value .env APP_BIND_HOST "${KIRAAI_BIND_HOST:-127.0.0.1}"
     set_env_value .env POSTGRES_PASSWORD "$postgres_password"
     set_env_value .env AUTH_ENABLED "true"
     set_env_value .env AUTH_BOOTSTRAP_EMAIL "$(env_file_value .env AUTH_BOOTSTRAP_EMAIL)"
@@ -294,9 +336,9 @@ write_env() {
     set_env_value .env APP_USER "node"
     set_env_value .env CODE_JOB_SANDBOX "workspace-write"
     set_env_value .env CODEX_SUMMARY_SANDBOX "read-only"
-    echo "Production profile enabled. App port binds to 127.0.0.1; use a reverse proxy/TLS for public access."
+    echo "Production profile enabled. App port binds to ${KIRAAI_BIND_HOST:-127.0.0.1}; use a reverse proxy/TLS for public access when internet-facing."
   else
-    set_env_value .env APP_BIND_HOST "0.0.0.0"
+    set_env_value .env APP_BIND_HOST "${KIRAAI_BIND_HOST:-0.0.0.0}"
     set_env_value .env AUTH_ENABLED "false"
     set_env_value .env POSTGRES_PASSWORD "postgres"
     set_env_value .env APP_USER "root"
@@ -393,11 +435,7 @@ start_services() {
 
 env_value() {
   local key="$1"
-  local value=""
-  if [[ -f "$PROJECT_DIR/.env" ]]; then
-    value="$(grep -E "^${key}=" "$PROJECT_DIR/.env" | tail -n 1 | cut -d= -f2- || true)"
-  fi
-  printf '%s' "$value"
+  env_file_value "$PROJECT_DIR/.env" "$key"
 }
 
 detect_server_ip() {
@@ -430,9 +468,11 @@ verify_app() {
 
 finish_message() {
   local app_port
+  local bind_host
   local server_ip
   app_port="$(env_value APP_HOST_PORT)"
   app_port="${app_port:-4000}"
+  bind_host="$(env_value APP_BIND_HOST)"
   server_ip="$(detect_server_ip)"
 
   echo
@@ -440,7 +480,9 @@ finish_message() {
   echo "Project: ${PROJECT_DIR}"
   echo "Profile: ${KIRAAI_PROFILE}"
   echo "Open from this VM: http://localhost:${app_port}"
-  if [[ "$KIRAAI_PROFILE" == "production" ]]; then
+  if [[ "$bind_host" == "0.0.0.0" ]]; then
+    echo "Open from your LAN browser: http://${server_ip}:${app_port}"
+  elif [[ "$KIRAAI_PROFILE" == "production" ]]; then
     if [[ -n "$KIRAAI_PUBLIC_URL" ]]; then
       echo "Public URL: ${KIRAAI_PUBLIC_URL}"
     else

@@ -20,6 +20,12 @@ Production server, recommended behind a reverse proxy with TLS:
 KIRAAI_PROFILE=production bash <(curl -fsSL https://raw.githubusercontent.com/HA2614/KiraAI-MCP/main/install.sh)
 ```
 
+Production server on a private LAN where you want to open `http://SERVER-IP:4000` directly:
+
+```bash
+KIRAAI_PROFILE=production KIRAAI_BIND_HOST=0.0.0.0 bash <(curl -fsSL https://raw.githubusercontent.com/HA2614/KiraAI-MCP/main/install.sh)
+```
+
 Local/dev install:
 
 ```bash
@@ -138,6 +144,7 @@ KIRAAI_PROFILE=production
 KIRAAI_INSTALL_DIR="$HOME/apps/KiraAI-MCP"
 KIRAAI_REPO_URL="https://github.com/HA2614/KiraAI-MCP.git"
 KIRAAI_BRANCH=main
+KIRAAI_BIND_HOST=0.0.0.0
 KIRAAI_SKIP_CODEX_LOGIN=1
 ```
 
